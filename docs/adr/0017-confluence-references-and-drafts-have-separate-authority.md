@@ -1,0 +1,35 @@
+# Confluence references and drafts have separate authority
+
+Status: accepted, 2026-09-18, resolving ticket 33 through two approved rounds. Specifies ADR 0009's reviewed Memory boundary and extends ADRs 0011/0012 with page/version scope and reference revocation recovery.
+
+Separate approved knowledge from Run-authored drafts using two dedicated private spaces: MAOIREF for curated references and MAOIDRAFT for draft postmortems. These keys require availability/collision checks before provisioning; no existing spaces or tenant grants are assumed. Group drafts by rehearsal where supported, but authorize verified space/page IDs, not titles, labels or parent placement. Prior-rehearsal artifacts remain human-visible without automatically entering a new Run's context.
+
+## Principals and operations
+
+Use a dedicated non-admin automation principal with reference read access and only the draft-space capabilities required for native draft create/read/versioned update. A separate human curator/operator controls approval, publication, seed edits, archive/delete and grants. All Run access uses the accepted TLS Forwarder with scoped sentinels. Enforce registered current-rehearsal page/Incident identity and allowed operation/body/status even when tenant-native grants are broader. A space key, role name or draft status is not itself an authorization boundary.
+
+Permit only approved-reference reads and scoped native draft creation/read/expected-version updates, plus narrowly scoped metadata/space resolution necessary for those operations. Explicitly require and verify draft status for Run writes. Deny Run publication, approval, unrestricted CQL/space enumeration, attachments, comments, labels, move/copy/delete and permission/restriction changes. Prevent metadata and pagination leakage across scopes. If safe enforcement fails, disable the affected route and disclose degraded optional Memory rather than broadening grants. Confirmed OPS work remains valid under ADR 0009.
+
+## Reference approval and seeds
+
+The curator publishes a separate reference page/version linked to its source Incident and draft revision. Do not promote a bot-owned draft by adding an approved label. An operator-owned manifest records approved reference space/page IDs, exact versions, body digests, source provenance, reviewer and approval/revocation state. Runs cannot modify that manifest. Serve only listed pages whose current returned version and digest match the approved snapshot. Changed, archived/deleted or unverifiable pages are unavailable until reviewed; do not assume historical-version reads work or silently admit the latest body.
+
+Seed only a human-reviewed service/dependency catalog and diagnostic runbooks from pinned repository/upstream revisions, with source URL/path, revision and review date. Exclude planned-Fault postmortems, adjudication Ground truth and scoring hints. Freeze the approved manifest at rehearsal start; additions/edits normally enter the next rehearsal after review. Immediate revocation overrides the snapshot. Earlier Incident-derived guidance requires explicit reference approval and never makes an old Incident eligible for Match. Reopening or pending correction suspends affected guidance reuse pending review.
+
+## Draft identity and conflict recovery
+
+Maintain an operator/Receiver-owned durable mapping from tenant plus OPS Incident ID to draft page ID, origin rehearsal, last confirmed version and mutation receipt; retain the authoritative Incident-to-draft link in OPS. The mapping records processing identity and receipts; it does not replace OPS authority. Record create intent before dispatch. Reconcile uncertain creates through trusted receipts/read-back; if identity remains uncertain, hold that secondary Memory step for human resolution rather than creating another draft or adopting by title. Preserve mapping across reset/handoff so a fresh rehearsal cannot manufacture a duplicate; preservation does not authorize new Runs to read or modify earlier-rehearsal drafts.
+
+Bind each update to the exact version used to compose its body. Conflicts require reread/review, not an automatic overwrite. Installed confluence-as 1.1.1 GETs the current page and PUTs version plus one, with no caller-supplied expected-version option in inspected help. That alone cannot bind stale composed content to its source version. Specify a narrow adapter or Forwarder-enforced version contract and verify it before enabling updates. Native draft creation/read-back and effective permissions still require tenant acceptance. Normal Incident completion, one draft per Incident, human-forced-completion exclusion and secondary-failure behavior remain ADR 0009's rules.
+
+## Revocation and human workflow
+
+Revoke new reads/reference admission immediately and track the exact reference versions delivered to active Runs. If a Run received a revoked reference, cancel it through ADR 0012's bounded cancellation/recovery path and hold subsequent model dispatch for operator review. If exposure cannot be determined, conservatively treat active Runs admitted to that manifest as affected. Cancellation cannot remove already-seen context or roll back external writes. Reconcile confirmed/uncertain effects, mark affected outputs for review and suspend related promotion. Retry only through existing explicit operator recovery and spend rules with newly admitted context; no automatic model retry. A changed reference body is unavailable pending review, not approved by its old manifest entry.
+
+Keep original drafts, provenance, approval/revocation history and links for humans across rehearsals with no automatic deletion or re-exposure to Runs. The curator owns publication, amendments and explicit archive/delete; withdrawal updates the manifest. Record reviewer, source draft/Incident revision, approved reference version/digest and provenance on publication. Keep draft/reference identities separate. Curation does not retroactively validate a draft or erase Report defects. Unresolved creates/conflicts remain visible incomplete Memory work. Ticket 34 defines the audience presentation.
+
+## Evidence and acceptance
+
+Offline capability facts and captured CLI help establish installed 1.1.1 native draft status options, ID-based page access and source-level read-then-increment updates. This installation has no api discovery command. None establishes tenant namespace availability, draft read-back, permissions, expected-version enforcement or bypass resistance.
+
+Ticket 43 specifies exact native operations, manifests/mappings, body/version binding, scoped grants and client/Forwarder acceptance. Offline tests exercise actual requests and policy boundaries; separately authorized tenant checks use approved disposable artifacts for native draft lifecycle, human publication, restricted reads/writes and bypass prevention. Enable no affected capability until its gate passes; optional Memory degradation remains available. Tickets 32/34/36/37/39 consume storage, presentation, enforcement, recovery and audit inputs. No spaces, pages, grants, credentials, runtime or Skill changes, publication or model Runs occurred.

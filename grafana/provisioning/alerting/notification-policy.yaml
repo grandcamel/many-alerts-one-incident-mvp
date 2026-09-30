@@ -1,0 +1,28 @@
+# The notification policy: one route, everything to the Receiver, grouped by
+# `incident_group` on demo timescales (the MVP spec's shared interfaces).
+#
+# Grouping by `incident_group` rather than by folder and alert name is what makes
+# the related rules in alert-rule.yaml one group: one Notification carries every
+# related alert that has fired, and a later one carries the group again with
+# the alerts that joined, so one Run creates one Incident and later Runs update
+# it. Grouping by `alertname` would send each rule on its own and make a
+# Notification, a Run and a candidate Incident per rule.
+#
+# The timings: `group_wait: 30s` holds the first Notification so that the rules
+# that fire within seconds of each other arrive together; `group_interval: 1m`
+# is how soon a rule that fires later joins as an update; `repeat_interval: 3m`
+# resends an unchanged group so the repeat path is exercised during the demo.
+# Grafana's default repeat interval is four hours, which would mean the group
+# fires once and the repeat never comes; the spec calls the override the most
+# likely thing to be lost if this stack is rebuilt from the
+# grafana/docker-otel-lgtm repo it came from.
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: demo-receiver
+    group_by:
+      - incident_group
+    group_wait: 30s
+    group_interval: 1m
+    repeat_interval: 3m

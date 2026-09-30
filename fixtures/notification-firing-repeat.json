@@ -1,0 +1,56 @@
+{
+  "receiver": "demo-receiver",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "rolldice request rate is zero",
+        "grafana_folder": "demo",
+        "instance": "rolldice:8082",
+        "service": "rolldice",
+        "severity": "critical"
+      },
+      "annotations": {
+        "description": "The rolldice request rate has been zero for thirty seconds.",
+        "summary": "rolldice is receiving no traffic"
+      },
+      "startsAt": "2026-09-15T03:41:50Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://localhost:3000/alerting/grafana/rolldice-rate-zero/view?orgId=1",
+      "fingerprint": "87e2f184874a3b71",
+      "silenceURL": "http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Drolldice-rate-zero&matcher=instance%3Drolldice%3A8082&matcher=service%3Drolldice&matcher=severity%3Dcritical&orgId=1",
+      "dashboardURL": "",
+      "panelURL": "",
+      "values": {
+        "A": 0,
+        "B": 1
+      },
+      "valueString": "[ var='A' labels={instance=rolldice:8082} value=0 ], [ var='B' labels={instance=rolldice:8082} value=1 ]",
+      "orgId": 1
+    }
+  ],
+  "groupLabels": {
+    "alertname": "rolldice request rate is zero",
+    "grafana_folder": "demo"
+  },
+  "commonLabels": {
+    "alertname": "rolldice request rate is zero",
+    "grafana_folder": "demo",
+    "instance": "rolldice:8082",
+    "service": "rolldice",
+    "severity": "critical"
+  },
+  "commonAnnotations": {
+    "description": "The rolldice request rate has been zero for thirty seconds.",
+    "summary": "rolldice is receiving no traffic"
+  },
+  "externalURL": "http://localhost:3000/",
+  "version": "1",
+  "groupKey": "{}:{alertname=\"rolldice request rate is zero\", grafana_folder=\"demo\"}",
+  "truncatedAlerts": 0,
+  "orgId": 1,
+  "title": "[FIRING:1] rolldice request rate is zero demo (rolldice:8082 rolldice critical)",
+  "state": "alerting",
+  "message": "**Firing**\n\nValue: A=0, B=1\nLabels:\n - alertname = rolldice request rate is zero\n - grafana_folder = demo\n - instance = rolldice:8082\n - service = rolldice\n - severity = critical\nAnnotations:\n - description = The rolldice request rate has been zero for thirty seconds.\n - summary = rolldice is receiving no traffic\nSource: http://localhost:3000/alerting/grafana/rolldice-rate-zero/view?orgId=1\nSilence: http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Drolldice-rate-zero&matcher=instance%3Drolldice%3A8082&matcher=service%3Drolldice&matcher=severity%3Dcritical&orgId=1\n"
+}

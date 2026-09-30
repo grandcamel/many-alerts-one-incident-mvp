@@ -1,0 +1,240 @@
+# The alert rules: one group of four related rules on the rolldice app, all
+# labelled `incident_group=checkout-outage`, so that stopping the traffic (the
+# presenter's one action) fires several of them within a minute or two and the
+# notification policy, grouping by that label, sends them to the Receiver as one
+# group: one Incident, updated as the related alerts join (the MVP spec).
+#
+# The metric is the one the Python auto-instrumentation in this image actually
+# exports — asked of Prometheus with rolldice under traffic, not guessed — and it
+# keeps being exported after the traffic stops, so the rate reads zero rather
+# than going missing. Every query names `service_name="rolldice"` and nothing
+# else, so no rule can fire on anything but the demo app.
+#
+# The labels are what the skill's field mapping reads: `severity` becomes the
+# Severity and Urgency fields, `service` the Component, and `incident_group` is
+# what Grafana groups the alerts by and what the Incident's `grp-` label comes
+# from. `instance` arrives from the series itself, and `alertname` and
+# `grafana_folder` from Grafana.
+#
+# What fires when, after `docker compose stop traffic` (evaluated every ten
+# seconds, the rate window taking about thirty seconds to empty):
+#
+#   ~1m00  rolldice request rate is zero            traffic absence, 30s pending
+#   ~1m00  rolldice successful responses have dropped   2xx drop, 30s pending
+#   ~1m30  rolldice health probe is failing         no probe answered in a minute
+#   ~2m40  rolldice outage is sustained             the same absence, 2m pending
+#
+# The first two arrive in the first Notification, after the policy's group wait;
+# the probe rule joins on the next group interval; the sustained-outage rule fires
+# last, deliberately, as the related alert that exercises the update path.
+#
+# The traffic-absence rule stays first: `doctor` and `verify` look it up by its
+# uid, and the offline doctor checks read `rules[0]` of this group.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: rolldice
+    folder: demo
+    interval: 10s
+    rules:
+      # 1. Traffic absence: the request rate has been zero for thirty seconds (story 54).
+      - uid: rolldice-rate-zero
+        title: rolldice request rate is zero
+        condition: B
+        data:
+          # A: requests per second at rolldice, per instance, over a window of four of
+          # its five-second exports. Shorter would risk a window with one sample and no
+          # rate at all; longer means the rate reads zero that much later than the
+          # traffic stopped, and the thirty seconds below start counting from there.
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 60
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: sum by (instance) (rate(http_server_duration_milliseconds_count{service_name="rolldice"}[20s]))
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+          # B: that rate is zero. Firing once it has been for thirty seconds.
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.01
+        for: 30s
+        # Before rolldice has served its first request there is no series at all.
+        # That is not an Incident, and a Notification about it would start a Run,
+        # so both no-data and a query error stay Normal.
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+          service: rolldice
+          incident_group: checkout-outage
+        annotations:
+          summary: rolldice is receiving no traffic
+          description: The rolldice request rate has been zero for thirty seconds.
+        isPaused: false
+
+      # 2. Success (2xx) drop: fewer than half the expected successful answers a second.
+      # The synthetic traffic is one request a second, every one of them a 200, so
+      # under traffic this reads about 1.0 and after the stop it reads zero; a
+      # rolldice that answered but with errors would drop it the same way.
+      - uid: rolldice-2xx-drop
+        title: rolldice successful responses have dropped
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 60
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: sum by (instance) (rate(http_server_duration_milliseconds_count{service_name="rolldice", http_status_code=~"2.."}[20s]))
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.5
+        for: 30s
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+          service: rolldice
+          incident_group: checkout-outage
+        annotations:
+          summary: rolldice successful responses have dropped
+          description: rolldice has answered fewer than half the expected successful (2xx) requests a second for thirty seconds.
+        isPaused: false
+
+      # 3. Health-probe failure: the synthetic probe (the traffic service, one request
+      # a second at /rolldice) has had no request completed at rolldice in the last
+      # minute. `increase` over a minute counts completed requests, so this reads
+      # about 60 under traffic and reaches zero a minute after the stop; the pending
+      # period is short because the window already is the wait.
+      - uid: rolldice-probe-failing
+        title: rolldice health probe is failing
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 120
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: sum by (instance) (increase(http_server_duration_milliseconds_count{service_name="rolldice"}[1m]))
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1
+        for: 20s
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+          service: rolldice
+          incident_group: checkout-outage
+        annotations:
+          summary: the rolldice health probe is failing
+          description: The synthetic probe has completed no request at rolldice in the last minute.
+        isPaused: false
+
+      # 4. Sustained outage: the same absence as rule 1, but pending for two minutes,
+      # so it fires well after the others and joins the open Incident as a related
+      # alert. That is the update path, on purpose.
+      - uid: rolldice-outage-sustained
+        title: rolldice outage is sustained
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 60
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: sum by (instance) (rate(http_server_duration_milliseconds_count{service_name="rolldice"}[20s]))
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.01
+        for: 2m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+          service: rolldice
+          incident_group: checkout-outage
+        annotations:
+          summary: the rolldice outage is sustained
+          description: The rolldice request rate has been zero for two minutes.
+        isPaused: false

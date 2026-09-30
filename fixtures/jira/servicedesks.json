@@ -1,0 +1,35 @@
+{
+  "size": 3,
+  "start": 0,
+  "limit": 50,
+  "isLastPage": true,
+  "values": [
+    {
+      "id": "3",
+      "projectId": "10010",
+      "projectName": "Help desk",
+      "projectKey": "HELP",
+      "_links": {
+        "self": "https://sandbox.example.invalid/rest/servicedeskapi/servicedesk/3"
+      }
+    },
+    {
+      "id": "5",
+      "projectId": "10020",
+      "projectName": "Facilities",
+      "projectKey": "FAC",
+      "_links": {
+        "self": "https://sandbox.example.invalid/rest/servicedeskapi/servicedesk/5"
+      }
+    },
+    {
+      "id": "7",
+      "projectId": "10042",
+      "projectName": "Demo incidents",
+      "projectKey": "SANDBOX",
+      "_links": {
+        "self": "https://sandbox.example.invalid/rest/servicedeskapi/servicedesk/7"
+      }
+    }
+  ]
+}

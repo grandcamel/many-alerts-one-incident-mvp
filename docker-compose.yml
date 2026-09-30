@@ -1,0 +1,199 @@
+# The whole demo: the LGTM stack the Alert fires from, the container the Run
+# happens in, and the synthetic traffic whose absence fires the Alert, on one
+# network so Grafana's contact point can name `demo` by service name and the
+# presenter can watch both from the laptop.
+#
+# Both are published on the laptop's loopback address and nowhere else: Grafana
+# runs with anonymous Admin, and anything that can post to the Receiver starts a
+# paid Run that writes to Jira. BIND_ADDRESS, GRAFANA_HOST_PORT and
+# RECEIVER_HOST_PORT move them, from the shell or .env, when 3000 or 8080 is
+# taken; the containers' own ports, and so the contact point, never move.
+#
+#     cp .env.example .env    # then fill it in
+#     docker compose up -d --build
+#     docker compose logs -f demo
+#
+# The presenter's one action, and its undo:
+#
+#     docker compose stop traffic     # the Alert fires within about a minute
+#     docker compose start traffic    # the Alert resolves
+#
+# No Docker socket is mounted anywhere, and no credential is written here: the
+# demo service reads .env, which git ignores and the build context refuses.
+#
+# On a laptop behind an intercepting proxy, name the corporate root CA (PEM, in
+# the certs directory, which git ignores) and both builds trust it (ticket 02):
+#
+#     EXTRA_CA_CERT=certs/corporate-root.crt docker compose build
+
+services:
+  lgtm:
+    # Pinned by tag and by the digest of its multi-platform index (linux/amd64 and
+    # linux/arm64) to the release `latest` was on the owner's laptop on 2026-09-23,
+    # because `latest` moves every week or so, and with the rule's noDataState at
+    # OK a metric that drifted would leave the Alert silently never firing.
+    # LGTM_IMAGE, in the shell or .env, names another, such as the same image in an
+    # internal mirror.
+    image: ${LGTM_IMAGE:-grafana/otel-lgtm:0.33.0@sha256:475319e883b66594d1a2f22ef168c2459802bb94548e6f25d9782bd5f5c19a3a}
+    ports:
+      # Grafana, which is what the audience watches. OTLP stays on the network,
+      # where rolldice exports to it; nothing on the laptop needs it.
+      - "${BIND_ADDRESS:-127.0.0.1}:${GRAFANA_HOST_PORT:-3000}:3000"
+    environment:
+      GF_PATHS_DATA: /data/grafana
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      # The contact point, the notification policy and the alert rule, from this
+      # repo and nowhere else (story 53). Grafana reads the directory once, at
+      # startup, so a change here is `docker compose restart lgtm`.
+      - ./grafana/provisioning/alerting:/otel-lgtm/grafana/conf/provisioning/alerting:ro
+    networks:
+      - demo
+    restart: unless-stopped
+
+  demo:
+    build:
+      context: .
+      args:
+        EXTRA_CA_CERT: ${EXTRA_CA_CERT:-certs/NO_EXTRA_CERTS}
+    image: grafana-jsm-sandbox:latest
+    # The Jira credential and the Anthropic token, from a file git never takes.
+    env_file:
+      - .env
+    ports:
+      # The Receiver, so the replay script can post from the laptop. Grafana
+      # reaches it on the network instead, at http://demo:8080/notification.
+      - "${BIND_ADDRESS:-127.0.0.1}:${RECEIVER_HOST_PORT:-8080}:8080"
+    networks:
+      - demo
+    # The runtime boundary, in the shape Anthropic's secure-deployment guide gives
+    # a headless agent (ADR 0005). Every capability dropped: the Receiver binds an
+    # unprivileged port and needs none. No new privileges: the image has no sudo
+    # and no setuid route to root, and this says a Run could not gain one even if
+    # something in the image were to grow it back. A root filesystem nothing can
+    # write, with what must be written on tmpfs and nowhere else: the temp
+    # directory, the runs directory (RUNS_DIRECTORY in the Dockerfile) and the Run
+    # user's home, where the entrypoint writes the onboarding flag and Claude Code
+    # its configuration and Transcripts. Those three are exactly what `docker diff`
+    # lists after three Runs. Nothing survives a restart, and nothing needs to. The
+    # uid is the one the Dockerfile gave the account; a tmpfs is otherwise root's.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+      - /app/runs:uid=1000,gid=1000,mode=0700,size=64m
+      - /home/demo:uid=1000,gid=1000,mode=0700,size=512m
+    # Sized for three Runs in a row on a laptop, so a runaway Run cannot take the
+    # machine down mid-demo: a Run is one Claude Code process, its shell and
+    # jira-as, and a whole lifecycle peaked at 24 tasks and 227 MB (ticket 03).
+    # Compose older than 2.2 ignores pids_limit and older than 2.17 ignores cpus;
+    # the opt-in container check reads what the kernel enforces and names the
+    # one that is missing.
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2
+    # Python's standard library, because the image carries no curl: compose must
+    # report the container healthy for the right reason. Started through `env -i`
+    # with an empty environment: Docker hands every process it execs here the
+    # container's whole environment, real Jira token included, as the Runs' own
+    # uid and dumpable, and this one starts every ten seconds. `env` holds it only
+    # until it execs Python, whose /proc/<pid>/environ is then empty (ADR 0002's
+    # amendment). Hence Python's full path: there is no PATH left to search.
+    healthcheck:
+      test:
+        - CMD
+        - env
+        - -i
+        - /usr/bin/python3
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=4)
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Deliberately no restart policy. The Receiver refuses to start on a half-filled
+    # .env and says which variable is missing; restarting it would turn that one
+    # readable message into a crash loop that scrolls itself away.
+
+  # The service the Alert is about: the rolldice example app, auto-instrumented,
+  # exporting its request metrics to the lgtm service every five seconds. It stays
+  # up throughout; only its traffic comes and goes.
+  rolldice:
+    build:
+      # The repo root, so that the certificate argument names the same file for
+      # both images; the Dockerfile copies its two files from under docker/rolldice.
+      context: .
+      dockerfile: docker/rolldice/Dockerfile
+      args:
+        EXTRA_CA_CERT: ${EXTRA_CA_CERT:-certs/NO_EXTRA_CERTS}
+    image: grafana-jsm-sandbox-rolldice:latest
+    environment:
+      OTEL_SERVICE_NAME: rolldice
+      OTEL_RESOURCE_ATTRIBUTES: service.instance.id=rolldice:8082
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4317
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
+    depends_on:
+      - lgtm
+    networks:
+      - demo
+    restart: unless-stopped
+
+  # The synthetic traffic: one request a second at rolldice, for as long as this
+  # service runs. Stopping it is what fires the Alert; starting it again is what
+  # resolves it. It has no restart policy so that a stop stays stopped.
+  traffic:
+    image: alpine:3.20
+    command:
+      - sh
+      - -c
+      - while true; do wget -qO- 'http://rolldice:8082/rolldice?player=demo'; echo; sleep 1; done
+    # The shell loop ignores SIGTERM, so without this a `stop` sends traffic for
+    # the full ten-second grace period before the kill, and the presenter's one
+    # action returns ten seconds late (ticket 08 rehearsal).
+    stop_grace_period: 1s
+    depends_on:
+      - rolldice
+    networks:
+      - demo
+
+  # A fake Jira Cloud, for rehearsing the MVP with a real model and no real site
+  # (docs/local-fake-jira-rehearsal.md). It is under a profile, so a plain
+  # `docker compose up` never starts it: it runs only with `--profile fake-jira`,
+  # and nothing reaches it unless .env's JIRA_SITE_URL names it, as
+  # http://fakejira:8090. That one value serves both sides: the demo container
+  # resolves `fakejira` on this network, and the laptop resolves it to loopback
+  # once /etc/hosts says `127.0.0.1 fakejira`, where this publishes it. The image
+  # is the demo's own, so the fake is the same code the container carries; the
+  # entrypoint hands the command through. FAKE_JIRA_WORKFLOW picks the workflow
+  # (itsm or custom) and FAKE_JIRA_PORT moves the port on both sides at once,
+  # from the shell or .env. It holds no credential: it accepts any non-empty one.
+  fakejira:
+    profiles:
+      - fake-jira
+    build:
+      context: .
+      args:
+        EXTRA_CA_CERT: ${EXTRA_CA_CERT:-certs/NO_EXTRA_CERTS}
+    image: grafana-jsm-sandbox:latest
+    command:
+      - python3
+      - -m
+      - grafana_jsm_sandbox.fake_jira
+      - --workflow
+      - ${FAKE_JIRA_WORKFLOW:-itsm}
+      - --host
+      - 0.0.0.0
+      - --port
+      - ${FAKE_JIRA_PORT:-8090}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${FAKE_JIRA_PORT:-8090}:${FAKE_JIRA_PORT:-8090}"
+    networks:
+      - demo
+
+networks:
+  demo:

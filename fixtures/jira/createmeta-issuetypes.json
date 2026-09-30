@@ -1,0 +1,42 @@
+{
+  "issueTypes": [
+    {
+      "self": "https://sandbox.example.invalid/rest/api/3/issuetype/10101",
+      "id": "10101",
+      "name": "Incident",
+      "description": "",
+      "subtask": false
+    },
+    {
+      "self": "https://sandbox.example.invalid/rest/api/3/issuetype/10102",
+      "id": "10102",
+      "name": "Service request",
+      "description": "",
+      "subtask": false
+    },
+    {
+      "self": "https://sandbox.example.invalid/rest/api/3/issuetype/10103",
+      "id": "10103",
+      "name": "Problem",
+      "description": "",
+      "subtask": false
+    },
+    {
+      "self": "https://sandbox.example.invalid/rest/api/3/issuetype/10104",
+      "id": "10104",
+      "name": "Change",
+      "description": "",
+      "subtask": false
+    },
+    {
+      "self": "https://sandbox.example.invalid/rest/api/3/issuetype/10105",
+      "id": "10105",
+      "name": "Task",
+      "description": "",
+      "subtask": false
+    }
+  ],
+  "maxResults": 50,
+  "startAt": 0,
+  "total": 5
+}

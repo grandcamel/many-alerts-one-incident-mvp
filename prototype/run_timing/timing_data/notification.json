@@ -1,0 +1,204 @@
+{
+  "receiver": "demo-receiver",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "RecommendationLatencyP99High",
+        "grafana_folder": "otel-demo",
+        "instance": "recommendation:1010",
+        "service": "recommendation",
+        "severity": "critical"
+      },
+      "annotations": {
+        "description": "p99 of ListRecommendations has been above the 1000ms threshold for two minutes.",
+        "summary": "recommendation ListRecommendations p99 is above 1s"
+      },
+      "startsAt": "2026-09-15T14:04:30Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://localhost:3000/alerting/grafana/recommendationlatencyp99high/view?orgId=1",
+      "fingerprint": "f1a2b3c4d5e60718",
+      "silenceURL": "http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DRecommendationLatencyP99High",
+      "dashboardURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1",
+      "panelURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1&viewPanel=4",
+      "values": {
+        "A": 2380.0
+      },
+      "valueString": "[ var='A' labels={service=recommendation} value=2380.0 ]",
+      "orgId": 1
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "RecommendationMemoryClimbing",
+        "grafana_folder": "otel-demo",
+        "instance": "recommendation:1010",
+        "service": "recommendation",
+        "severity": "warning"
+      },
+      "annotations": {
+        "description": "Container memory for recommendation has grown by more than 300MB in five minutes.",
+        "summary": "recommendation resident memory is climbing"
+      },
+      "startsAt": "2026-09-15T14:05:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://localhost:3000/alerting/grafana/recommendationmemoryclimbing/view?orgId=1",
+      "fingerprint": "a9b8c7d6e5f40312",
+      "silenceURL": "http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DRecommendationMemoryClimbing",
+      "dashboardURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1",
+      "panelURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1&viewPanel=8",
+      "values": {
+        "A": 812000000.0
+      },
+      "valueString": "[ var='A' labels={service=recommendation} value=812000000.0 ]",
+      "orgId": 1
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "RecommendationCpuSaturated",
+        "grafana_folder": "otel-demo",
+        "instance": "recommendation:1010",
+        "service": "recommendation",
+        "severity": "warning"
+      },
+      "annotations": {
+        "description": "CPU utilization for recommendation has been above 0.85 for one minute.",
+        "summary": "recommendation is using nearly a whole core"
+      },
+      "startsAt": "2026-09-15T14:05:30Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://localhost:3000/alerting/grafana/recommendationcpusaturated/view?orgId=1",
+      "fingerprint": "0c1d2e3f4a5b6970",
+      "silenceURL": "http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DRecommendationCpuSaturated",
+      "dashboardURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1",
+      "panelURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1&viewPanel=5",
+      "values": {
+        "A": 0.91
+      },
+      "valueString": "[ var='A' labels={service=recommendation} value=0.91 ]",
+      "orgId": 1
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "FrontendLatencyP95High",
+        "grafana_folder": "otel-demo",
+        "instance": "frontend:8080",
+        "service": "frontend",
+        "severity": "critical"
+      },
+      "annotations": {
+        "description": "p95 of the frontend HTTP handler has been above the 1000ms threshold for one minute.",
+        "summary": "frontend p95 latency is above 1s"
+      },
+      "startsAt": "2026-09-15T14:06:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://localhost:3000/alerting/grafana/frontendlatencyp95high/view?orgId=1",
+      "fingerprint": "7e6d5c4b3a291807",
+      "silenceURL": "http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DFrontendLatencyP95High",
+      "dashboardURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1",
+      "panelURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1&viewPanel=39",
+      "values": {
+        "A": 1910.0
+      },
+      "valueString": "[ var='A' labels={service=frontend} value=1910.0 ]",
+      "orgId": 1
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "FrontendProxyErrorRate",
+        "grafana_folder": "otel-demo",
+        "instance": "frontend-proxy:8080",
+        "service": "frontend-proxy",
+        "severity": "warning"
+      },
+      "annotations": {
+        "description": "Envoy is returning more than 1 5xx per second at the edge.",
+        "summary": "the edge proxy is returning 5xx"
+      },
+      "startsAt": "2026-09-15T14:06:30Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://localhost:3000/alerting/grafana/frontendproxyerrorrate/view?orgId=1",
+      "fingerprint": "2b3c4d5e6f708192",
+      "silenceURL": "http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DFrontendProxyErrorRate",
+      "dashboardURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1",
+      "panelURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1&viewPanel=25",
+      "values": {
+        "A": 4.2
+      },
+      "valueString": "[ var='A' labels={service=frontend-proxy} value=4.2 ]",
+      "orgId": 1
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "ProductCatalogLatencyP95High",
+        "grafana_folder": "otel-demo",
+        "instance": "product-catalog:3550",
+        "service": "product-catalog",
+        "severity": "warning"
+      },
+      "annotations": {
+        "description": "p95 of ListProducts and GetProduct has been above 200ms for one minute.",
+        "summary": "product-catalog p95 latency is above 200ms"
+      },
+      "startsAt": "2026-09-15T14:07:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://localhost:3000/alerting/grafana/productcataloglatencyp95high/view?orgId=1",
+      "fingerprint": "8f9e0d1c2b3a4556",
+      "silenceURL": "http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DProductCatalogLatencyP95High",
+      "dashboardURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1",
+      "panelURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1&viewPanel=11",
+      "values": {
+        "A": 305.0
+      },
+      "valueString": "[ var='A' labels={service=product-catalog} value=305.0 ]",
+      "orgId": 1
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HostCpuHigh",
+        "grafana_folder": "otel-demo",
+        "instance": "otel-demo-1",
+        "service": "host",
+        "severity": "warning"
+      },
+      "annotations": {
+        "description": "Whole-host CPU utilization has been above 0.85 for one minute.",
+        "summary": "host CPU is above 85 percent"
+      },
+      "startsAt": "2026-09-15T14:07:30Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://localhost:3000/alerting/grafana/hostcpuhigh/view?orgId=1",
+      "fingerprint": "4d5e6f708192a3b4",
+      "silenceURL": "http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DHostCpuHigh",
+      "dashboardURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1",
+      "panelURL": "http://localhost:3000/d/otel-demo-services/services?orgId=1&viewPanel=9",
+      "values": {
+        "A": 0.88
+      },
+      "valueString": "[ var='A' labels={service=host} value=0.88 ]",
+      "orgId": 1
+    }
+  ],
+  "groupLabels": {
+    "grafana_folder": "otel-demo"
+  },
+  "commonLabels": {
+    "grafana_folder": "otel-demo"
+  },
+  "commonAnnotations": {},
+  "externalURL": "http://localhost:3000/",
+  "version": "1",
+  "groupKey": "{}:{grafana_folder=\"otel-demo\"}",
+  "truncatedAlerts": 0,
+  "orgId": 1,
+  "title": "[FIRING:7] otel-demo",
+  "state": "alerting",
+  "message": "**Firing**\n\n- RecommendationLatencyP99High (recommendation, critical)\n- RecommendationMemoryClimbing (recommendation, warning)\n- RecommendationCpuSaturated (recommendation, warning)\n- FrontendLatencyP95High (frontend, critical)\n- FrontendProxyErrorRate (frontend-proxy, warning)\n- ProductCatalogLatencyP95High (product-catalog, warning)\n- HostCpuHigh (host, warning)",
+  "notifiedAt": "2026-09-15T14:07:45Z"
+}

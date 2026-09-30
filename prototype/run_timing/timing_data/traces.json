@@ -1,0 +1,163 @@
+[
+  {
+    "traceId": "3f5c1a90b7d4e2118a6c0f3e9d215b47",
+    "startTime": "2026-09-15T14:06:12Z",
+    "durationMs": 2412,
+    "rootService": "frontend",
+    "rootName": "GET /api/recommendations",
+    "status": "ERROR",
+    "spans": [
+      {
+        "service": "frontend",
+        "name": "GET /api/recommendations",
+        "durationMs": 2412,
+        "status": "ERROR",
+        "attributes": {
+          "http.status_code": 504
+        }
+      },
+      {
+        "service": "recommendation",
+        "name": "ListRecommendations",
+        "durationMs": 2380,
+        "status": "OK",
+        "attributes": {
+          "demo.recommendation.cache_hit": false,
+          "demo.feature_flag.recommendation_cache": true,
+          "app.recommendation.cache_size": 7816,
+          "app.filtered_products.count": 5
+        }
+      },
+      {
+        "service": "product-catalog",
+        "name": "ListProducts",
+        "durationMs": 291,
+        "status": "OK",
+        "attributes": {
+          "db.system": "postgresql",
+          "app.products.count": 10
+        }
+      }
+    ]
+  },
+  {
+    "traceId": "bb70c4e2119d3a5f8e61c0742a9f3d16",
+    "startTime": "2026-09-15T13:56:00Z",
+    "durationMs": 131,
+    "rootService": "frontend",
+    "rootName": "GET /api/recommendations",
+    "status": "OK",
+    "spans": [
+      {
+        "service": "frontend",
+        "name": "GET /api/recommendations",
+        "durationMs": 131,
+        "status": "OK",
+        "attributes": {
+          "http.status_code": 200
+        }
+      },
+      {
+        "service": "recommendation",
+        "name": "ListRecommendations",
+        "durationMs": 39,
+        "status": "OK",
+        "attributes": {
+          "demo.recommendation.cache_hit": true,
+          "demo.feature_flag.recommendation_cache": false,
+          "app.recommendation.cache_size": 1043,
+          "app.filtered_products.count": 5
+        }
+      },
+      {
+        "service": "product-catalog",
+        "name": "ListProducts",
+        "durationMs": 16,
+        "status": "OK",
+        "attributes": {
+          "db.system": "postgresql",
+          "app.products.count": 10
+        }
+      }
+    ]
+  },
+  {
+    "traceId": "9a1e4d77c3b05f2648de1a9b0c573e82",
+    "startTime": "2026-09-15T14:07:40Z",
+    "durationMs": 1974,
+    "rootService": "frontend",
+    "rootName": "GET /",
+    "status": "OK",
+    "spans": [
+      {
+        "service": "frontend",
+        "name": "GET /",
+        "durationMs": 1974,
+        "status": "OK",
+        "attributes": {
+          "http.status_code": 200
+        }
+      },
+      {
+        "service": "recommendation",
+        "name": "ListRecommendations",
+        "durationMs": 1902,
+        "status": "OK",
+        "attributes": {
+          "demo.recommendation.cache_hit": false,
+          "demo.feature_flag.recommendation_cache": true,
+          "app.recommendation.cache_size": 6252
+        }
+      },
+      {
+        "service": "ad",
+        "name": "GetAds",
+        "durationMs": 31,
+        "status": "OK",
+        "attributes": {}
+      }
+    ]
+  },
+  {
+    "traceId": "c20b8f6134ae95d7021f4c8a6b3d9e05",
+    "startTime": "2026-09-15T14:05:00Z",
+    "durationMs": 212,
+    "rootService": "frontend",
+    "rootName": "POST /api/checkout",
+    "status": "OK",
+    "spans": [
+      {
+        "service": "frontend",
+        "name": "POST /api/checkout",
+        "durationMs": 212,
+        "status": "OK",
+        "attributes": {
+          "http.status_code": 200
+        }
+      },
+      {
+        "service": "checkout",
+        "name": "PlaceOrder",
+        "durationMs": 188,
+        "status": "OK",
+        "attributes": {}
+      },
+      {
+        "service": "payment",
+        "name": "Charge",
+        "durationMs": 30,
+        "status": "OK",
+        "attributes": {
+          "app.payment.charged": true
+        }
+      },
+      {
+        "service": "shipping",
+        "name": "ShipOrder",
+        "durationMs": 43,
+        "status": "OK",
+        "attributes": {}
+      }
+    ]
+  }
+]

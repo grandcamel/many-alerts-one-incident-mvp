@@ -1,0 +1,19 @@
+# The contact point: where Grafana posts every Notification. The Receiver, named
+# by compose service on the shared network, never localhost — from inside the
+# LGTM container, localhost is the LGTM container.
+#
+# Its name is the `receiver` field of every Notification it sends, which is why
+# the canned fixtures carry the same one.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: demo-receiver
+    receivers:
+      - uid: demo-receiver
+        type: webhook
+        settings:
+          url: http://demo:8080/notification
+          httpMethod: POST
+        # A Resolved is a Notification too; it is what Completes the Incident.
+        disableResolveMessage: false

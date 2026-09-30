@@ -1,0 +1,137 @@
+{
+  "receiver": "demo-receiver",
+  "status": "resolved",
+  "alerts": [
+    {
+      "status": "resolved",
+      "labels": {
+        "alertname": "rolldice request rate is zero",
+        "grafana_folder": "demo",
+        "incident_group": "checkout-outage",
+        "instance": "rolldice:8082",
+        "service": "rolldice",
+        "severity": "critical"
+      },
+      "annotations": {
+        "description": "The rolldice request rate has been zero for thirty seconds.",
+        "summary": "rolldice is receiving no traffic"
+      },
+      "startsAt": "2026-09-25T14:02:10Z",
+      "endsAt": "2026-09-25T14:06:40Z",
+      "generatorURL": "http://localhost:3000/alerting/grafana/rolldice-rate-zero/view?orgId=1",
+      "fingerprint": "87e2f184874a3b71",
+      "silenceURL": "http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Drolldice-rate-zero&matcher=incident_group%3Dcheckout-outage&matcher=instance%3Drolldice%3A8082&matcher=service%3Drolldice&matcher=severity%3Dcritical&orgId=1",
+      "dashboardURL": "",
+      "panelURL": "",
+      "values": {
+        "A": 1,
+        "B": 0
+      },
+      "valueString": "[ var='A' labels={instance=rolldice:8082} value=1 ], [ var='B' labels={instance=rolldice:8082} value=0 ]",
+      "orgId": 1
+    },
+    {
+      "status": "resolved",
+      "labels": {
+        "alertname": "rolldice successful responses have dropped",
+        "grafana_folder": "demo",
+        "incident_group": "checkout-outage",
+        "instance": "rolldice:8082",
+        "service": "rolldice",
+        "severity": "critical"
+      },
+      "annotations": {
+        "description": "rolldice has answered fewer than half the expected successful (2xx) requests a second for thirty seconds.",
+        "summary": "rolldice successful responses have dropped"
+      },
+      "startsAt": "2026-09-25T14:02:10Z",
+      "endsAt": "2026-09-25T14:06:40Z",
+      "generatorURL": "http://localhost:3000/alerting/grafana/rolldice-2xx-drop/view?orgId=1",
+      "fingerprint": "3c1d9a7e5b2f8046",
+      "silenceURL": "http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Drolldice-2xx-drop&matcher=incident_group%3Dcheckout-outage&matcher=instance%3Drolldice%3A8082&matcher=service%3Drolldice&matcher=severity%3Dcritical&orgId=1",
+      "dashboardURL": "",
+      "panelURL": "",
+      "values": {
+        "A": 1,
+        "B": 0
+      },
+      "valueString": "[ var='A' labels={instance=rolldice:8082} value=1 ], [ var='B' labels={instance=rolldice:8082} value=0 ]",
+      "orgId": 1
+    },
+    {
+      "status": "resolved",
+      "labels": {
+        "alertname": "rolldice health probe is failing",
+        "grafana_folder": "demo",
+        "incident_group": "checkout-outage",
+        "instance": "rolldice:8082",
+        "service": "rolldice",
+        "severity": "critical"
+      },
+      "annotations": {
+        "description": "The synthetic probe has completed no request at rolldice in the last minute.",
+        "summary": "the rolldice health probe is failing"
+      },
+      "startsAt": "2026-09-25T14:02:10Z",
+      "endsAt": "2026-09-25T14:06:40Z",
+      "generatorURL": "http://localhost:3000/alerting/grafana/rolldice-probe-failing/view?orgId=1",
+      "fingerprint": "a94f0c2e7d13b58c",
+      "silenceURL": "http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Drolldice-probe-failing&matcher=incident_group%3Dcheckout-outage&matcher=instance%3Drolldice%3A8082&matcher=service%3Drolldice&matcher=severity%3Dcritical&orgId=1",
+      "dashboardURL": "",
+      "panelURL": "",
+      "values": {
+        "A": 1,
+        "B": 0
+      },
+      "valueString": "[ var='A' labels={instance=rolldice:8082} value=1 ], [ var='B' labels={instance=rolldice:8082} value=0 ]",
+      "orgId": 1
+    },
+    {
+      "status": "resolved",
+      "labels": {
+        "alertname": "rolldice outage is sustained",
+        "grafana_folder": "demo",
+        "incident_group": "checkout-outage",
+        "instance": "rolldice:8082",
+        "service": "rolldice",
+        "severity": "critical"
+      },
+      "annotations": {
+        "description": "The rolldice request rate has been zero for two minutes.",
+        "summary": "the rolldice outage is sustained"
+      },
+      "startsAt": "2026-09-25T14:03:40Z",
+      "endsAt": "2026-09-25T14:06:40Z",
+      "generatorURL": "http://localhost:3000/alerting/grafana/rolldice-outage-sustained/view?orgId=1",
+      "fingerprint": "6e0b5d3f19c7a2e4",
+      "silenceURL": "http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Drolldice-outage-sustained&matcher=incident_group%3Dcheckout-outage&matcher=instance%3Drolldice%3A8082&matcher=service%3Drolldice&matcher=severity%3Dcritical&orgId=1",
+      "dashboardURL": "",
+      "panelURL": "",
+      "values": {
+        "A": 1,
+        "B": 0
+      },
+      "valueString": "[ var='A' labels={instance=rolldice:8082} value=1 ], [ var='B' labels={instance=rolldice:8082} value=0 ]",
+      "orgId": 1
+    }
+  ],
+  "groupLabels": {
+    "incident_group": "checkout-outage"
+  },
+  "commonLabels": {
+    "grafana_folder": "demo",
+    "incident_group": "checkout-outage",
+    "instance": "rolldice:8082",
+    "service": "rolldice",
+    "severity": "critical"
+  },
+  "commonAnnotations": {},
+  "externalURL": "http://localhost:3000/",
+  "version": "1",
+  "groupKey": "{}:{incident_group=\"checkout-outage\"}",
+  "truncatedAlerts": 0,
+  "orgId": 1,
+  "title": "[RESOLVED]  (checkout-outage demo rolldice:8082 rolldice critical)",
+  "state": "ok",
+  "message": "**Resolved**\n\nValue: A=1, B=0\nLabels:\n - alertname = rolldice request rate is zero\n - grafana_folder = demo\n - incident_group = checkout-outage\n - instance = rolldice:8082\n - service = rolldice\n - severity = critical\nAnnotations:\n - description = The rolldice request rate has been zero for thirty seconds.\n - summary = rolldice is receiving no traffic\nSource: http://localhost:3000/alerting/grafana/rolldice-rate-zero/view?orgId=1\nSilence: http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Drolldice-rate-zero&matcher=incident_group%3Dcheckout-outage&matcher=instance%3Drolldice%3A8082&matcher=service%3Drolldice&matcher=severity%3Dcritical&orgId=1\n\nValue: A=1, B=0\nLabels:\n - alertname = rolldice successful responses have dropped\n - grafana_folder = demo\n - incident_group = checkout-outage\n - instance = rolldice:8082\n - service = rolldice\n - severity = critical\nAnnotations:\n - description = rolldice has answered fewer than half the expected successful (2xx) requests a second for thirty seconds.\n - summary = rolldice successful responses have dropped\nSource: http://localhost:3000/alerting/grafana/rolldice-2xx-drop/view?orgId=1\nSilence: http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Drolldice-2xx-drop&matcher=incident_group%3Dcheckout-outage&matcher=instance%3Drolldice%3A8082&matcher=service%3Drolldice&matcher=severity%3Dcritical&orgId=1\n\nValue: A=1, B=0\nLabels:\n - alertname = rolldice health probe is failing\n - grafana_folder = demo\n - incident_group = checkout-outage\n - instance = rolldice:8082\n - service = rolldice\n - severity = critical\nAnnotations:\n - description = The synthetic probe has completed no request at rolldice in the last minute.\n - summary = the rolldice health probe is failing\nSource: http://localhost:3000/alerting/grafana/rolldice-probe-failing/view?orgId=1\nSilence: http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Drolldice-probe-failing&matcher=incident_group%3Dcheckout-outage&matcher=instance%3Drolldice%3A8082&matcher=service%3Drolldice&matcher=severity%3Dcritical&orgId=1\n\nValue: A=1, B=0\nLabels:\n - alertname = rolldice outage is sustained\n - grafana_folder = demo\n - incident_group = checkout-outage\n - instance = rolldice:8082\n - service = rolldice\n - severity = critical\nAnnotations:\n - description = The rolldice request rate has been zero for two minutes.\n - summary = the rolldice outage is sustained\nSource: http://localhost:3000/alerting/grafana/rolldice-outage-sustained/view?orgId=1\nSilence: http://localhost:3000/alerting/silence/new?alertmanager=grafana&matcher=__alert_rule_uid__%3Drolldice-outage-sustained&matcher=incident_group%3Dcheckout-outage&matcher=instance%3Drolldice%3A8082&matcher=service%3Drolldice&matcher=severity%3Dcritical&orgId=1\n"
+}

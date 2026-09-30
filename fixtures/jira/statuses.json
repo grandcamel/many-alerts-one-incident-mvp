@@ -1,0 +1,117 @@
+[
+  {
+    "self": "https://sandbox.example.invalid/rest/api/3/issueType/10102",
+    "id": "10102",
+    "name": "Service request",
+    "subtask": false,
+    "statuses": [
+      {
+        "self": "https://sandbox.example.invalid/rest/api/3/status/10210",
+        "id": "10210",
+        "name": "Waiting for support",
+        "description": "",
+        "statusCategory": {
+          "id": 2,
+          "key": "new",
+          "name": "To Do"
+        }
+      },
+      {
+        "self": "https://sandbox.example.invalid/rest/api/3/status/10211",
+        "id": "10211",
+        "name": "In progress",
+        "description": "",
+        "statusCategory": {
+          "id": 4,
+          "key": "indeterminate",
+          "name": "In Progress"
+        }
+      },
+      {
+        "self": "https://sandbox.example.invalid/rest/api/3/status/10212",
+        "id": "10212",
+        "name": "Resolved",
+        "description": "",
+        "statusCategory": {
+          "id": 3,
+          "key": "done",
+          "name": "Done"
+        }
+      }
+    ]
+  },
+  {
+    "self": "https://sandbox.example.invalid/rest/api/3/issueType/10101",
+    "id": "10101",
+    "name": "Incident",
+    "subtask": false,
+    "statuses": [
+      {
+        "self": "https://sandbox.example.invalid/rest/api/3/status/10200",
+        "id": "10200",
+        "name": "Open",
+        "description": "",
+        "statusCategory": {
+          "id": 2,
+          "key": "new",
+          "name": "To Do"
+        }
+      },
+      {
+        "self": "https://sandbox.example.invalid/rest/api/3/status/10201",
+        "id": "10201",
+        "name": "Work in progress",
+        "description": "",
+        "statusCategory": {
+          "id": 4,
+          "key": "indeterminate",
+          "name": "In Progress"
+        }
+      },
+      {
+        "self": "https://sandbox.example.invalid/rest/api/3/status/10202",
+        "id": "10202",
+        "name": "Pending",
+        "description": "",
+        "statusCategory": {
+          "id": 4,
+          "key": "indeterminate",
+          "name": "In Progress"
+        }
+      },
+      {
+        "self": "https://sandbox.example.invalid/rest/api/3/status/10203",
+        "id": "10203",
+        "name": "Completed",
+        "description": "",
+        "statusCategory": {
+          "id": 3,
+          "key": "done",
+          "name": "Done"
+        }
+      },
+      {
+        "self": "https://sandbox.example.invalid/rest/api/3/status/10204",
+        "id": "10204",
+        "name": "Canceled",
+        "description": "",
+        "statusCategory": {
+          "id": 3,
+          "key": "done",
+          "name": "Done"
+        }
+      },
+      {
+        "self": "https://sandbox.example.invalid/rest/api/3/status/10205",
+        "id": "10205",
+        "name": "Closed",
+        "description": "",
+        "statusCategory": {
+          "id": 3,
+          "key": "done",
+          "name": "Done"
+        }
+      }
+    ]
+  }
+]

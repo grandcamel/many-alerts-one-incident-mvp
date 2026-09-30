@@ -1,0 +1,307 @@
+{
+  "fields": [
+    {
+      "fieldId": "summary",
+      "key": "summary",
+      "name": "Summary",
+      "required": true,
+      "hasDefaultValue": false,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "string",
+        "system": "summary"
+      }
+    },
+    {
+      "fieldId": "issuetype",
+      "key": "issuetype",
+      "name": "Issue Type",
+      "required": true,
+      "hasDefaultValue": false,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "issuetype",
+        "system": "issuetype"
+      }
+    },
+    {
+      "fieldId": "project",
+      "key": "project",
+      "name": "Project",
+      "required": true,
+      "hasDefaultValue": false,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "project",
+        "system": "project"
+      }
+    },
+    {
+      "fieldId": "reporter",
+      "key": "reporter",
+      "name": "Reporter",
+      "required": true,
+      "hasDefaultValue": true,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "user",
+        "system": "reporter"
+      }
+    },
+    {
+      "fieldId": "description",
+      "key": "description",
+      "name": "Description",
+      "required": false,
+      "hasDefaultValue": false,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "string",
+        "system": "description"
+      }
+    },
+    {
+      "fieldId": "labels",
+      "key": "labels",
+      "name": "Labels",
+      "required": false,
+      "hasDefaultValue": false,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "array",
+        "system": "labels"
+      }
+    },
+    {
+      "fieldId": "components",
+      "key": "components",
+      "name": "Components",
+      "required": false,
+      "hasDefaultValue": false,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "array",
+        "system": "components"
+      }
+    },
+    {
+      "fieldId": "priority",
+      "key": "priority",
+      "name": "Priority",
+      "required": false,
+      "hasDefaultValue": true,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "priority",
+        "system": "priority"
+      }
+    },
+    {
+      "fieldId": "customfield_10040",
+      "key": "customfield_10040",
+      "name": "Severity",
+      "required": false,
+      "hasDefaultValue": false,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "option",
+        "custom": "com.atlassian.jira.plugin.system.customfieldtypes:select",
+        "customId": 10040
+      },
+      "allowedValues": [
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100400",
+          "value": "Sev-0",
+          "id": "100400"
+        },
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100401",
+          "value": "Sev-1",
+          "id": "100401"
+        },
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100402",
+          "value": "Sev-2",
+          "id": "100402"
+        },
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100403",
+          "value": "Sev-3",
+          "id": "100403"
+        },
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100404",
+          "value": "Sev-4",
+          "id": "100404"
+        }
+      ]
+    },
+    {
+      "fieldId": "customfield_10041",
+      "key": "customfield_10041",
+      "name": "Urgency",
+      "required": false,
+      "hasDefaultValue": false,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "option",
+        "custom": "com.atlassian.jira.plugin.system.customfieldtypes:select",
+        "customId": 10041
+      },
+      "allowedValues": [
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100410",
+          "value": "Critical",
+          "id": "100410"
+        },
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100411",
+          "value": "High",
+          "id": "100411"
+        },
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100412",
+          "value": "Medium",
+          "id": "100412"
+        },
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100413",
+          "value": "Low",
+          "id": "100413"
+        }
+      ]
+    },
+    {
+      "fieldId": "customfield_10042",
+      "key": "customfield_10042",
+      "name": "Source",
+      "required": false,
+      "hasDefaultValue": false,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "option",
+        "custom": "com.atlassian.jira.plugin.system.customfieldtypes:select",
+        "customId": 10042
+      },
+      "allowedValues": [
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100420",
+          "value": "Monitoring systems",
+          "id": "100420"
+        },
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100421",
+          "value": "Email",
+          "id": "100421"
+        },
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100422",
+          "value": "Phone",
+          "id": "100422"
+        },
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100423",
+          "value": "Chat",
+          "id": "100423"
+        }
+      ]
+    },
+    {
+      "fieldId": "customfield_10043",
+      "key": "customfield_10043",
+      "name": "Impact",
+      "required": false,
+      "hasDefaultValue": false,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "option",
+        "custom": "com.atlassian.jira.plugin.system.customfieldtypes:select",
+        "customId": 10043
+      },
+      "allowedValues": [
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100430",
+          "value": "Extensive / Widespread",
+          "id": "100430"
+        },
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100431",
+          "value": "Significant / Large",
+          "id": "100431"
+        },
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100432",
+          "value": "Moderate / Limited",
+          "id": "100432"
+        },
+        {
+          "self": "https://sandbox.example.invalid/rest/api/3/customFieldOption/100433",
+          "value": "Minor / Localized",
+          "id": "100433"
+        }
+      ]
+    },
+    {
+      "fieldId": "customfield_10044",
+      "key": "customfield_10044",
+      "name": "Major incident",
+      "required": false,
+      "hasDefaultValue": false,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "option",
+        "custom": "com.atlassian.jira.plugin.system.customfieldtypes:multicheckboxes",
+        "customId": 10044
+      },
+      "allowedValues": [
+        {
+          "value": "Major incident",
+          "id": "100440"
+        }
+      ]
+    },
+    {
+      "fieldId": "attachment",
+      "key": "attachment",
+      "name": "Attachment",
+      "required": false,
+      "hasDefaultValue": false,
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "array",
+        "system": "attachment"
+      }
+    }
+  ],
+  "maxResults": 50,
+  "startAt": 0,
+  "total": 14
+}

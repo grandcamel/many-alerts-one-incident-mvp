@@ -1,0 +1,41 @@
+{"timestamp": "2026-09-15T13:50:00Z", "service": "recommendation", "severity": "INFO", "body": "ListRecommendations served 5 products in 38ms (cache_hit=true)"}
+{"timestamp": "2026-09-15T13:52:00Z", "service": "recommendation", "severity": "INFO", "body": "ListRecommendations served 5 products in 38ms (cache_hit=true)"}
+{"timestamp": "2026-09-15T13:54:00Z", "service": "recommendation", "severity": "INFO", "body": "ListRecommendations served 5 products in 38ms (cache_hit=true)"}
+{"timestamp": "2026-09-15T13:56:00Z", "service": "recommendation", "severity": "INFO", "body": "ListRecommendations served 5 products in 38ms (cache_hit=true)"}
+{"timestamp": "2026-09-15T14:02:00Z", "service": "flagd", "severity": "INFO", "body": "configuration_change received: 1 flag changed"}
+{"timestamp": "2026-09-15T14:02:00Z", "service": "payment", "severity": "INFO", "body": "Charge request completed, transaction approved"}
+{"timestamp": "2026-09-15T14:02:00Z", "service": "cart", "severity": "INFO", "body": "GetCart completed in 21ms"}
+{"timestamp": "2026-09-15T14:02:20Z", "service": "recommendation", "severity": "WARN", "body": "cache miss: recommendation cache size now 1043 entries"}
+{"timestamp": "2026-09-15T14:02:50Z", "service": "recommendation", "severity": "WARN", "body": "cache miss: recommendation cache size now 1310 entries"}
+{"timestamp": "2026-09-15T14:03:00Z", "service": "recommendation", "severity": "WARN", "body": "gc: collected generation 2 in 12ms, heap still growing"}
+{"timestamp": "2026-09-15T14:03:00Z", "service": "frontend", "severity": "ERROR", "body": "upstream deadline exceeded calling recommendation:1010 ListRecommendations"}
+{"timestamp": "2026-09-15T14:03:00Z", "service": "payment", "severity": "INFO", "body": "Charge request completed, transaction approved"}
+{"timestamp": "2026-09-15T14:03:00Z", "service": "cart", "severity": "INFO", "body": "GetCart completed in 21ms"}
+{"timestamp": "2026-09-15T14:03:20Z", "service": "recommendation", "severity": "WARN", "body": "cache miss: recommendation cache size now 1638 entries"}
+{"timestamp": "2026-09-15T14:03:45Z", "service": "frontend", "severity": "ERROR", "body": "upstream deadline exceeded calling recommendation:1010 ListRecommendations"}
+{"timestamp": "2026-09-15T14:03:50Z", "service": "recommendation", "severity": "WARN", "body": "cache miss: recommendation cache size now 2048 entries"}
+{"timestamp": "2026-09-15T14:04:00Z", "service": "recommendation", "severity": "WARN", "body": "gc: collected generation 2 in 41ms, heap still growing"}
+{"timestamp": "2026-09-15T14:04:00Z", "service": "frontend-proxy", "severity": "ERROR", "body": "GET /api/recommendations HTTP/1.1\" 504 UT 0 1 15001 - \"envoy\" upstream_reset_before_response_started"}
+{"timestamp": "2026-09-15T14:04:00Z", "service": "payment", "severity": "INFO", "body": "Charge request completed, transaction approved"}
+{"timestamp": "2026-09-15T14:04:00Z", "service": "cart", "severity": "INFO", "body": "GetCart completed in 21ms"}
+{"timestamp": "2026-09-15T14:04:20Z", "service": "recommendation", "severity": "WARN", "body": "cache miss: recommendation cache size now 2560 entries"}
+{"timestamp": "2026-09-15T14:04:30Z", "service": "frontend", "severity": "ERROR", "body": "upstream deadline exceeded calling recommendation:1010 ListRecommendations"}
+{"timestamp": "2026-09-15T14:04:50Z", "service": "recommendation", "severity": "WARN", "body": "cache miss: recommendation cache size now 3200 entries"}
+{"timestamp": "2026-09-15T14:04:50Z", "service": "frontend-proxy", "severity": "ERROR", "body": "GET /api/recommendations HTTP/1.1\" 504 UT 0 1 15001 - \"envoy\" upstream_reset_before_response_started"}
+{"timestamp": "2026-09-15T14:05:00Z", "service": "recommendation", "severity": "WARN", "body": "gc: collected generation 2 in 88ms, heap still growing"}
+{"timestamp": "2026-09-15T14:05:00Z", "service": "product-catalog", "severity": "WARN", "body": "ListProducts took 288ms, 19 backends open, called 41x in the last minute"}
+{"timestamp": "2026-09-15T14:05:15Z", "service": "frontend", "severity": "ERROR", "body": "upstream deadline exceeded calling recommendation:1010 ListRecommendations"}
+{"timestamp": "2026-09-15T14:05:20Z", "service": "recommendation", "severity": "WARN", "body": "cache miss: recommendation cache size now 4001 entries"}
+{"timestamp": "2026-09-15T14:05:40Z", "service": "frontend-proxy", "severity": "ERROR", "body": "GET /api/recommendations HTTP/1.1\" 504 UT 0 1 15001 - \"envoy\" upstream_reset_before_response_started"}
+{"timestamp": "2026-09-15T14:05:50Z", "service": "recommendation", "severity": "WARN", "body": "cache miss: recommendation cache size now 5002 entries"}
+{"timestamp": "2026-09-15T14:06:00Z", "service": "recommendation", "severity": "WARN", "body": "gc: collected generation 2 in 140ms, heap still growing"}
+{"timestamp": "2026-09-15T14:06:00Z", "service": "frontend", "severity": "ERROR", "body": "upstream deadline exceeded calling recommendation:1010 ListRecommendations"}
+{"timestamp": "2026-09-15T14:06:00Z", "service": "product-catalog", "severity": "WARN", "body": "ListProducts took 288ms, 19 backends open, called 41x in the last minute"}
+{"timestamp": "2026-09-15T14:06:20Z", "service": "recommendation", "severity": "WARN", "body": "cache miss: recommendation cache size now 6252 entries"}
+{"timestamp": "2026-09-15T14:06:30Z", "service": "frontend-proxy", "severity": "ERROR", "body": "GET /api/recommendations HTTP/1.1\" 504 UT 0 1 15001 - \"envoy\" upstream_reset_before_response_started"}
+{"timestamp": "2026-09-15T14:06:45Z", "service": "frontend", "severity": "ERROR", "body": "upstream deadline exceeded calling recommendation:1010 ListRecommendations"}
+{"timestamp": "2026-09-15T14:06:50Z", "service": "recommendation", "severity": "WARN", "body": "cache miss: recommendation cache size now 7816 entries"}
+{"timestamp": "2026-09-15T14:07:00Z", "service": "recommendation", "severity": "WARN", "body": "gc: collected generation 2 in 181ms, heap still growing"}
+{"timestamp": "2026-09-15T14:07:00Z", "service": "product-catalog", "severity": "WARN", "body": "ListProducts took 288ms, 19 backends open, called 41x in the last minute"}
+{"timestamp": "2026-09-15T14:07:20Z", "service": "recommendation", "severity": "WARN", "body": "cache miss: recommendation cache size now 9770 entries"}
+{"timestamp": "2026-09-15T14:07:20Z", "service": "frontend-proxy", "severity": "ERROR", "body": "GET /api/recommendations HTTP/1.1\" 504 UT 0 1 15001 - \"envoy\" upstream_reset_before_response_started"}

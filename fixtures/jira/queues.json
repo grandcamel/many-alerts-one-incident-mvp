@@ -1,0 +1,83 @@
+{
+  "_expands": [],
+  "size": 5,
+  "start": 0,
+  "limit": 50,
+  "isLastPage": true,
+  "_links": {
+    "base": "https://sandbox.example.invalid/rest/servicedeskapi",
+    "context": ""
+  },
+  "values": [
+    {
+      "id": "30",
+      "name": "All open",
+      "jql": "project = SANDBOX AND resolution = Unresolved ORDER BY \"Time to resolution\" ASC",
+      "fields": [
+        "issuetype",
+        "issuekey",
+        "summary",
+        "status"
+      ],
+      "_links": {
+        "self": "https://sandbox.example.invalid/rest/servicedeskapi/servicedesk/7/queue/30"
+      }
+    },
+    {
+      "id": "31",
+      "name": "Assigned to me",
+      "jql": "project = SANDBOX AND assignee = currentUser() AND resolution = Unresolved ORDER BY created DESC",
+      "fields": [
+        "issuetype",
+        "issuekey",
+        "summary",
+        "status"
+      ],
+      "_links": {
+        "self": "https://sandbox.example.invalid/rest/servicedeskapi/servicedesk/7/queue/31"
+      }
+    },
+    {
+      "id": "32",
+      "name": "Incidents",
+      "jql": "project = SANDBOX AND issuetype = Incident AND resolution = Unresolved ORDER BY \"Time to resolution\" ASC",
+      "fields": [
+        "issuetype",
+        "issuekey",
+        "summary",
+        "status"
+      ],
+      "_links": {
+        "self": "https://sandbox.example.invalid/rest/servicedeskapi/servicedesk/7/queue/32"
+      }
+    },
+    {
+      "id": "33",
+      "name": "Service requests",
+      "jql": "project = SANDBOX AND issuetype = \"Service request\" AND resolution = Unresolved ORDER BY created DESC",
+      "fields": [
+        "issuetype",
+        "issuekey",
+        "summary",
+        "status"
+      ],
+      "_links": {
+        "self": "https://sandbox.example.invalid/rest/servicedeskapi/servicedesk/7/queue/33"
+      }
+    },
+    {
+      "id": "34",
+      "name": "Problems",
+      "jql": "project = SANDBOX AND issuetype = Problem AND resolution = Unresolved ORDER BY created DESC",
+      "fields": [
+        "issuetype",
+        "issuekey",
+        "summary",
+        "status"
+      ],
+      "_links": {
+        "self": "https://sandbox.example.invalid/rest/servicedeskapi/servicedesk/7/queue/34"
+      }
+    }
+  ]
+}

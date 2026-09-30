@@ -1,0 +1,27 @@
+[build-system]
+# 64 is the first setuptools with the PEP 660 editable installs `pip install -e` needs.
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grafana-jsm-sandbox"
+version = "0.1.0"
+description = "Grafana alert Notification -> sandboxed Claude Run -> Jira Service Management Incident"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pyyaml>=6.0"]
+
+[tool.setuptools]
+# Named, because the repo root holds other directories setuptools would take for packages
+# (skill, docker, grafana, fixtures, prototype and more) and it refuses to guess between them.
+packages = ["grafana_jsm_sandbox"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

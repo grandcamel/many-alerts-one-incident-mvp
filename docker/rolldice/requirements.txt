@@ -1,0 +1,12 @@
+# Copied from grafana/docker-otel-lgtm, examples/python/requirements.txt
+# (https://github.com/grafana/docker-otel-lgtm), Copyright Grafana Labs, and
+# licensed under the Apache License, Version 2.0; a copy of the License is at
+# http://www.apache.org/licenses/LICENSE-2.0. Unchanged but for this header;
+# see NOTICE at the repository root.
+blinker==1.9.0
+click==8.3.1
+Flask==3.1.2
+itsdangerous==2.2.0
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+Werkzeug==3.1.4

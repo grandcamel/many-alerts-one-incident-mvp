@@ -1,0 +1,44 @@
+{
+  "isLast": true,
+  "maxResults": 50,
+  "startAt": 0,
+  "total": 6,
+  "values": [
+    {
+      "id": "10000",
+      "name": "Done",
+      "description": "",
+      "isDefault": false
+    },
+    {
+      "id": "10001",
+      "name": "Won't Do",
+      "description": "",
+      "isDefault": false
+    },
+    {
+      "id": "10002",
+      "name": "Duplicate",
+      "description": "",
+      "isDefault": false
+    },
+    {
+      "id": "10003",
+      "name": "Declined",
+      "description": "",
+      "isDefault": false
+    },
+    {
+      "id": "10004",
+      "name": "Cannot Reproduce",
+      "description": "",
+      "isDefault": false
+    },
+    {
+      "id": "10005",
+      "name": "Known error",
+      "description": "",
+      "isDefault": false
+    }
+  ]
+}

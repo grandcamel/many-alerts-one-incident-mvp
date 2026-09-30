@@ -1,0 +1,17 @@
+grafana-jsm-sandbox
+Copyright (c) 2026 grandcamel
+Licensed under the MIT License; see LICENSE.
+
+The rolldice example app under docker/rolldice/ is copied from
+grafana/docker-otel-lgtm (https://github.com/grafana/docker-otel-lgtm),
+directory examples/python/, Copyright Grafana Labs, and is licensed under the
+Apache License, Version 2.0 (a copy is in LICENSES/Apache-2.0.txt):
+
+    docker/rolldice/app.py            as upstream, with the attribution header added
+    docker/rolldice/requirements.txt  as upstream, with the attribution header added
+    docker/rolldice/Dockerfile        modified; its header says how
+
+The agent conventions under docs/agents/ (domain.md, issue-tracker.md and
+triage-labels.md) are adapted from the skill templates in mattpocock/skills
+(https://github.com/mattpocock/skills), Copyright (c) 2026 Matt Pocock, used
+under the MIT License; a copy is in LICENSES/mattpocock-skills-MIT.txt.

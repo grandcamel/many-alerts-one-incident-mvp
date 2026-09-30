@@ -1,0 +1,9 @@
+{
+  "id": "7",
+  "projectId": "10042",
+  "projectName": "Demo incidents",
+  "projectKey": "SANDBOX",
+  "_links": {
+    "self": "https://sandbox.example.invalid/rest/servicedeskapi/servicedesk/7"
+  }
+}

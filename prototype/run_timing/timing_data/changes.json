@@ -1,0 +1,32 @@
+[
+  {
+    "id": 411,
+    "time": "2026-09-15T13:10:00Z",
+    "source": "ci",
+    "tags": [
+      "deploy",
+      "payment"
+    ],
+    "text": "deploy: payment v1.8.3 rolled out to otel-demo (2 replicas)"
+  },
+  {
+    "id": 412,
+    "time": "2026-09-15T14:02:00Z",
+    "source": "flagd-watcher",
+    "tags": [
+      "feature-flag",
+      "recommendation"
+    ],
+    "text": "feature flag recommendationCache set to on (variant: on, previously off)"
+  },
+  {
+    "id": 413,
+    "time": "2026-09-15T08:02:00Z",
+    "source": "ci",
+    "tags": [
+      "deploy",
+      "frontend"
+    ],
+    "text": "deploy: frontend v2.1.0 rolled out to otel-demo (3 replicas)"
+  }
+]

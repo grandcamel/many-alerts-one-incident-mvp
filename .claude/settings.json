@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "deny": ["Read(./.env)", "Edit(./.env)"]
+  },
+  "jira": {
+    "allow_site_operations": true
+  }
+}
