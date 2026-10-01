@@ -224,9 +224,8 @@ Receiver starts imports them.
 **This repository is chapter two, and it opens with chapter one's code.** Chapter one, the
 basic demo above, was finished in `grafana-jsm-sandbox`, a demo in which one Grafana alert
 becomes one Jira Service Management Incident through a Run that holds no Jira credential. That
-repository is [where chapter one was first built](https://github.com/grandcamel/grafana-jsm-sandbox);
-it stays as it is and nothing in this effort touches it, so this repository is the one that
-moves from here, and the one to clone. Chapter two asks the harder question it is named for:
+repository, where chapter one was first built, is not published; everything it held is here,
+so this repository is the one that moves from here, and the one to clone. Chapter two asks the harder question it is named for:
 when one Fault in a simulated distributed system raises a Cascade of Alerts, how do many
 Notifications become one Incident whose Suggested root cause cites the evidence a Run
 retrieved? It is being charted before it is built. The vocabulary is in [CONTEXT.md](CONTEXT.md)
