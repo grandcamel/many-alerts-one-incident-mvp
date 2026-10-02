@@ -885,7 +885,7 @@ def test_it_imports_nothing_that_could_reach_out():
         "__future__",
         "argparse",
         "json",
-        "math",
+        "decimal",
         "urllib.parse",
         "grafana_jsm_sandbox.investigation_contract",
         "re",

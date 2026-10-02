@@ -102,13 +102,15 @@ presenter links; the Run receives only the four investigation variables.
    probe uses no model and no Jira. Check the datasource-proxy GET path, Viewer access, query
    output, and the Explore link in the presenter's browser. Viewer Explore access is not assumed.
 
-The CLI reads its environment only, never an env file. All flags follow the subcommand:
+The CLI reads its environment only, never an env file. All flags follow the subcommand, with
+their values given after `=` (`--query=EXPR`), so an expression that starts with `-` is not read
+as a flag:
 
 | Invocation | Flags |
 |---|---|
-| `grafana-query instant --query EXPR` | `--datasource UID` defaults to `prometheus`; `--time TIME` defaults to `now`. |
-| `grafana-query range --query EXPR` | `--datasource UID` defaults to `prometheus`; `--start TIME` to `now-10m`, `--end TIME` to `now`, `--step DURATION` to `10s`. |
-| `grafana-query get --path PATH` | `--datasource UID` defaults to `prometheus`; repeat `--param NAME=VALUE` for discovery parameters. Paths include `/api/v1/labels`, `/api/v1/series` and `/api/v1/metadata`. |
+| `grafana-query instant --query=EXPR` | `--datasource=UID` defaults to `prometheus`; `--time=TIME` defaults to `now`. |
+| `grafana-query range --query=EXPR` | `--datasource=UID` defaults to `prometheus`; `--start=TIME` to `now-10m`, `--end=TIME` to `now`, `--step=DURATION` to `10s`. |
+| `grafana-query get --path=PATH` | `--datasource=UID` defaults to `prometheus`; repeat `--param=NAME=VALUE` for discovery parameters. Paths include `/api/v1/labels`, `/api/v1/series` and `/api/v1/metadata`. |
 
 There are no URL, token, output-path or timeout flags. Direct invocation validates the Grafana
 URLs and token even when the enable flag is false; that flag controls Receiver wiring.

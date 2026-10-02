@@ -393,8 +393,9 @@ def _get_summary(response) -> tuple[dict, str]:
 
 
 def _presenter(base, args, proxy, parameters, start, end):
+    base = quote(base, safe=":/%[]")
     if args.command == "get":
-        return base + proxy + ("?" + urlencode(parameters) if parameters else "")
+        return base + quote(proxy, safe="/%") + ("?" + urlencode(parameters) if parameters else "")
     panes = {"A": {"datasource": args.datasource, "queries": [{
         "refId": "A", "expr": args.query, "instant": args.command == "instant",
         "range": args.command == "range",

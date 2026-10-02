@@ -55,13 +55,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 import sys
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
@@ -628,14 +628,14 @@ def _evidence_record(record: object) -> dict:
 
     string = (str,)
     nullable_string = (str, type(None))
-    number = (int, float)
-    nullable_number = (int, float, type(None))
+    number = (int, float, Decimal)
+    nullable_number = (*number, type(None))
     record = fields(record, {
         "schema_version": (int,), "command": string, "query": nullable_string,
         "datasource": string, "path": string, "parameters": (list,), "window": (dict,),
         "retrieved_at": string, "status": string, "error": (dict, type(None)),
         "sample_summary": (dict,), "presenter_link": nullable_string,
-        "response": (dict, list, str, int, float, bool, type(None)),
+        "response": (dict, list, str, *number, bool, type(None)),
     })
     if (record["schema_version"] != EVIDENCE_SCHEMA_VERSION
             or record["command"] not in ("instant", "range", "get")
@@ -656,7 +656,7 @@ def _evidence_record(record: object) -> dict:
                 raise ValueError("invalid evidence time")
             datetime.fromisoformat(value)
     step = window["step_seconds"]
-    if step is not None and (not math.isfinite(step) or step <= 0):
+    if step is not None and (not Decimal(step).is_finite() or step <= 0):
         raise ValueError("invalid step")
     if record["command"] in ("instant", "range") and (
         window["start"] is None or window["end"] is None
@@ -694,7 +694,7 @@ def _evidence_record(record: object) -> dict:
             raise ValueError("invalid series")
         if series["latest"] is not None:
             fields(series["latest"], {"timestamp": number, "value": string})
-            datetime.fromtimestamp(series["latest"]["timestamp"], UTC)
+            datetime.fromtimestamp(float(series["latest"]["timestamp"]), UTC)
     link = record["presenter_link"]
     if link is not None:
         parsed = urlsplit(link)
@@ -715,7 +715,7 @@ def read_evidence(path: Path) -> tuple[list[dict], str | None]:
     if not text:
         return [], "no query evidence recorded"
     try:
-        records = [_evidence_record(json.loads(line)) for line in text.splitlines()]
+        records = [_evidence_record(json.loads(line, parse_float=Decimal)) for line in text.splitlines()]
     except (ValueError, TypeError, OverflowError, OSError):
         return [], "evidence file unreadable"
     return records, None
@@ -738,7 +738,7 @@ def evidence_result(record: dict) -> str:
         first = series[0]
         latest = first["latest"]
         if latest is not None:
-            time = datetime.fromtimestamp(latest["timestamp"], UTC).isoformat(
+            time = datetime.fromtimestamp(float(latest["timestamp"]), UTC).isoformat(
                 timespec="milliseconds"
             ).replace("+00:00", "Z")
             words += f"; latest {plain(latest['value'])} at {time}"
@@ -781,9 +781,10 @@ def _observed_zero(record: dict) -> bool:
                 or not isinstance(sample[1], str)):
             return False
         try:
-            if float(sample[1]) != 0:
+            number = Decimal(sample[1])
+            if not number.is_finite() or number != 0:
                 return False
-        except ValueError:
+        except InvalidOperation:
             return False
     return bool(samples)
 
@@ -801,7 +802,7 @@ def evidence_display(record: dict) -> list[dict]:
     elif window["start"] is not None or window["end"] is not None:
         context += f", {window['start'] or 'none'}..{window['end'] or 'none'}"
     if record["command"] == "range":
-        context += f", step {window['step_seconds']:g}s"
+        context += f", step {Decimal(window['step_seconds']):g}s"
     context += f"; retrieved {record['retrieved_at']}"
     link = record["presenter_link"]
     destination = {"type": "text", "text": "no link"} if link is None else {

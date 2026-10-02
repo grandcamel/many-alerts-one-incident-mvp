@@ -246,5 +246,7 @@ def test_the_runbook_query_examples_use_only_frozen_subcommands_and_flags():
         words = example.split()
         command = words[1]
         found.add(command)
-        assert words == ["grafana-query", command, required[command], words[3]]
+        # Values follow `=`, so an expression starting with `-` is not read as a flag.
+        assert len(words) == 3 and words[:2] == ["grafana-query", command]
+        assert words[2].startswith(required[command] + "=") and words[2] != required[command] + "="
     assert found == set(required)

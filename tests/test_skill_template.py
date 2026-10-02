@@ -709,6 +709,15 @@ def test_render_and_materialize_select_investigation_without_changing_project_fa
     assert "{{" not in skill
 
 
+def test_enabled_investigation_uses_equals_arguments():
+    skill = render(TEMPLATE, SESSIONED, investigation_enabled=True)
+    assert "grafana-query instant --query='<expression>'" in skill
+    assert "grafana-query range --query='<expression>'" in skill
+    assert "--path=/api/v1/series --param='match[]=<selector>'" in skill
+    assert "--param='NAME=VALUE'" in skill
+    assert "--query " not in skill and "--path " not in skill and "--param " not in skill
+
+
 def test_enabled_investigation_is_create_only_after_create_and_opening_succeed():
     skill = render(TEMPLATE, SESSIONED, investigation_enabled=True)
     create = section(skill, "Step 2a")

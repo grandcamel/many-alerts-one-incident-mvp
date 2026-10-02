@@ -194,11 +194,11 @@ that metric is context, not independent reachability evidence. `checkout-outage`
 is a demonstration group label, not proof of a checkout service.
 
 ```bash
-grafana-query instant --query '<expression>'
-grafana-query range --query '<expression>'
-grafana-query get --path /api/v1/labels
-grafana-query get --path /api/v1/series --param 'match[]=<selector>'
-grafana-query get --path /api/v1/metadata
+grafana-query instant --query='<expression>'
+grafana-query range --query='<expression>'
+grafana-query get --path=/api/v1/labels
+grafana-query get --path=/api/v1/series --param='match[]=<selector>'
+grafana-query get --path=/api/v1/metadata
 ```
 
 Flags follow the subcommand. `--datasource <uid>` selects another datasource.
@@ -206,8 +206,10 @@ Instant's `--time` defaults to `now`; range's `--start`, `--end`, and `--step`
 default to `now-10m`, `now`, and `10s`. Time accepts relative `now-Ns`, `now-Nm`,
 `now-Nh`, `now-Nd`, finite Unix seconds or RFC3339 with a timezone. Step accepts
 positive seconds or a positive value with `s`, `m`, `h`, or `d`. GET's path is
-datasource-relative; repeat `--param 'NAME=VALUE'` for parameters. It invents no
-time window. Query arguments use plain single quotes; preserve double quotes and
+datasource-relative; repeat `--param='NAME=VALUE'` for parameters. It invents no
+time window. Use `--query=EXPR`, `--path=PATH` and `--param=NAME=VALUE` so leading
+minus signs stay in the value, for example `--query='-up'`.
+Query arguments use plain single quotes; preserve double quotes and
 backslashes in the expression inside those quotes. If an expression needs an
 apostrophe, choose an equivalent expression that fits the command boundary.
 

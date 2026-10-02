@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import json
+import re
+import shlex
 import subprocess
 import sys
 import threading
 import time
 import tomllib
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 import pytest
 
-from grafana_jsm_sandbox import grafana_query
+from grafana_jsm_sandbox import grafana_query, incident_payload
 from tests.grafana_upstream import FakeGrafana
 
 TOKEN = "viewer-test-secret"
@@ -62,6 +65,16 @@ def record(capsys, tmp_path):
     assert evidence["retrieved_at"].endswith("Z")
     assert len(evidence["retrieved_at"]) == 24
     return lines, evidence
+
+
+def evidence_comment(tmp_path):
+    [command] = incident_payload.investigate(
+        "SANDBOX-7", "Returned data", "Needs checking", "Check telemetry",
+        tmp_path / "grafana-evidence.jsonl",
+    )
+    arguments = shlex.split(command)
+    nodes = json.loads(arguments[arguments.index("-b") + 1])["content"][0]["content"]
+    return "".join(node["text"] for node in nodes), nodes
 
 
 def test_instant_proxy_evidence_and_presenter_link(grafana, capsys, tmp_path):
@@ -266,18 +279,33 @@ def test_relative_time_units_share_the_invocation_clock(grafana, capsys, tmp_pat
     assert float(sent["end"]) - float(sent["start"]) == seconds
 
 
-@pytest.mark.parametrize("step", ["1e100", "1" + "0" * 400 + ".5"])
-def test_no_step_or_observation_window_cap(grafana, capsys, tmp_path, step):
+@pytest.mark.parametrize("step", ["1e100", "1e400", "1" + "0" * 400 + ".5"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_no_step_or_observation_window_cap(configured, monkeypatch, capsys, tmp_path, step, failed):
+    monkeypatch.setattr(grafana_query, "_request", lambda *args: (
+        200, json.dumps(query_result("scalar", [1000, "2"])).encode(),
+    ))
+    assert grafana_query.main(["instant", "--query=up"]) == 0
+    record(capsys, tmp_path)
+    response = {"status": "error", "error": "bad query"} if failed else query_result("vector", [])
+    monkeypatch.setattr(grafana_query, "_request", lambda *args: (200, json.dumps(response).encode()))
     assert grafana_query.main([
         "range", "--query", "foo", "--start", "0", "--end", "1000000000", "--step", step
-    ]) == 0
+    ]) == (1 if failed else 0)
     lines, evidence = record(capsys, tmp_path)
-    if step == "1e100":
-        assert evidence["window"]["step_seconds"] == 10 ** 100
-        assert dict(evidence["parameters"])["step"] == "1" + "0" * 100
+    if step in ("1e100", "1e400"):
+        exponent = int(step[2:])
+        assert evidence["window"]["step_seconds"] == 10 ** exponent
+        assert dict(evidence["parameters"])["step"] == "1" + "0" * exponent
     else:
         assert '"step_seconds":' + step in lines[5]
         assert dict(evidence["parameters"])["step"] == step
+    body, _ = evidence_comment(tmp_path)
+    assert "latest 2 at " in body
+    assert ("unavailable: query error" if failed else "no data") in body
+    displayed_step = re.search(r", step (\S+)s; retrieved", body)[1]
+    assert Decimal(displayed_step) == Decimal(step)
+    assert "evidence file unreadable" not in body
 
 
 @pytest.mark.parametrize("status,response,kind,message,retained", [
@@ -418,6 +446,85 @@ def configured(monkeypatch, tmp_path):
     monkeypatch.setenv("DEMO_GRAFANA_URL", "http://upstream.example.invalid")
     monkeypatch.setenv("DEMO_GRAFANA_PRESENTER_URL", PRESENTER)
     monkeypatch.setenv("DEMO_GRAFANA_VIEWER_TOKEN", TOKEN)
+
+
+@pytest.mark.parametrize("value", ["1e-400", "0", "NaN", "+Inf", "not numeric"])
+def test_cli_sample_values_reach_comment_without_float_underflow(
+    configured, monkeypatch, capsys, tmp_path, value
+):
+    monkeypatch.setattr(grafana_query, "_request", lambda *args: (
+        200, json.dumps(query_result("string", [1000.5, value])).encode(),
+    ))
+    assert grafana_query.main(["instant", "--query=up"]) == 0
+    lines, _ = record(capsys, tmp_path)
+    body, _ = evidence_comment(tmp_path)
+    assert ("observed zero" in body) == (value == "0")
+    assert lines[0] == "grafana-query: " + ("observed zero" if value == "0" else "ok")
+    if value != "0":
+        assert f"latest {value} at 1970-01-01T00:16:40.500Z" in body
+    if value == "1e-400":
+        assert "min 1e-400, max 1e-400" in body
+
+
+def test_extreme_step_query_error_reaches_unavailable_comment(
+    configured, monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setattr(grafana_query, "_request", lambda *args: (
+        200, b'{"status":"error","error":"bad query"}',
+    ))
+    assert grafana_query.main(["range", "--query=up", "--step", "1e400"]) == 1
+    record(capsys, tmp_path)
+    body, _ = evidence_comment(tmp_path)
+    assert "Observation: Evidence unavailable" in body
+    assert body.endswith("Evidence: unavailable: query error")
+
+
+def test_equals_path_with_leading_minus_reaches_path_validation(configured, capsys, tmp_path):
+    assert grafana_query.main(["get", "--path=-up"]) == 2
+    output = capsys.readouterr()
+    assert output.err == "grafana-query: error: --path must be an absolute datasource-relative path\n"
+    assert not (tmp_path / "grafana-evidence.jsonl").exists()
+
+
+@pytest.mark.parametrize("arguments", [
+    ["instant", "--query=up"], ["get", "--path=/api/v1/labels"],
+])
+def test_presenter_base_path_is_encoded_for_comment(
+    configured, monkeypatch, capsys, tmp_path, arguments
+):
+    base = "http://localhost:3000/grafana(demo)/already%20encoded"
+    monkeypatch.setenv("DEMO_GRAFANA_PRESENTER_URL", base)
+    monkeypatch.setattr(grafana_query, "_request", lambda *args: (
+        200, json.dumps(query_result("scalar", [1000, "2"])).encode(),
+    ))
+    assert grafana_query.main(arguments) == 0
+    _, evidence = record(capsys, tmp_path)
+    body, nodes = evidence_comment(tmp_path)
+    [link] = [mark["attrs"]["href"] for node in nodes for mark in node.get("marks", [])
+              if mark["type"] == "link"]
+    assert link == evidence["presenter_link"]
+    assert link.startswith("http://localhost:3000/grafana%28demo%29/already%20encoded/")
+    assert unquote(urlsplit(link).path).startswith("/grafana(demo)/already encoded/")
+    assert "evidence file unreadable" not in body
+
+
+@pytest.mark.parametrize("arguments,parameters", [
+    (["instant", "--query=-up"], [("query", "-up")]),
+    (["range", "--query=-up"], [("query", "-up")]),
+    (["get", "--path=/api/v1/query", "--param=query=-up", "--param=-name=-value"],
+     [("query", "-up"), ("-name", "-value")]),
+])
+def test_equals_arguments_preserve_leading_minus_values(
+    configured, monkeypatch, capsys, tmp_path, arguments, parameters
+):
+    monkeypatch.setattr(grafana_query, "_request", lambda *args: (
+        200, json.dumps(query_result("scalar", [1000, "-1"])).encode(),
+    ))
+    assert grafana_query.main(arguments) == 0
+    _, evidence = record(capsys, tmp_path)
+    assert evidence["parameters"][:len(parameters)] == [list(pair) for pair in parameters]
+    body, _ = evidence_comment(tmp_path)
+    assert "-up" in body and "latest -1 at " in body
 
 
 @pytest.mark.parametrize("arguments,flag", [

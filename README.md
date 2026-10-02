@@ -218,8 +218,9 @@ with a Viewer token.” Grafana still allows anonymous Admin, and query traffic 
 A Run holds its model credential and, when enabled, a Grafana Viewer credential; Jira still
 uses the Forwarder's sentinel. The whole Grafana deployment is not read-only.
 
-The CLI offers `instant --query EXPR`, `range --query EXPR` and `get --path PATH`, with flags
-after the subcommand. It reads its environment only and appends full JSON evidence to
+The CLI offers `instant --query=EXPR`, `range --query=EXPR` and `get --path=PATH`, with flags
+after the subcommand and values given with `=`, so an expression that starts with `-` is not read
+as a flag. It reads its environment only and appends full JSON evidence to
 `grafana-evidence.jsonl` in the Run's directory. There is no query allow list, attempt budget,
 retry policy, response-size limit, sample cap or observation-window cap. The ten-second
 per-request elapsed timeout and first-five-line Transcript summary keep it usable; the
