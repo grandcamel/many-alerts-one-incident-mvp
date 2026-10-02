@@ -17,7 +17,9 @@ the stack down.
     jira     through jira-as with `.env`, as `configure` asks: who the credential is,
              the site, the project and the permissions the account holds on it
     facts    the field ids in `.env` against the project's own create screen and the
-             values the Skill writes, the Incident workflow and the resolution Done
+             values the Skill writes, the Incident workflow and the resolution Done,
+             and the Incidents queue: whether `configure` can find it, and whether
+             the address in `.env` is one of the project's queues
     stack    `docker compose ps`, the demo container's health, and this command again
              inside the container (`--in-container`, below)
     grafana  what the running Grafana took from the provisioning files, asked of its
@@ -55,11 +57,15 @@ process, and the one child, `--with-model`'s Run, gets a Run's environment.
 (`run_command.build_run_command`, the allow list included) and by the Run spawner
 itself, to run `jira-as --version` and read its rendered Skill, and nothing else.
 Its Jira is an address where nothing listens, so whatever it does it cannot reach
-the site, and its token is a throwaway sentinel. It says which model the seat
-really ran, whether the Run failed and why, in the words of the log's `[FAILED]`
-and `[hint]` lines, and whether either allowed call was denied, which would mean
-the organisation's managed permission rules override the Run's own. Its working
-directory, and so its Transcript, stay under the runs directory, as a Run's do.
+the site, and its token is a throwaway sentinel. It says which model it asked for
+(`RUN_MODEL`) and which one the seat really ran, read from the Run's Transcript:
+the same model, or an alias resolved to its full name, is OK, and any other model
+is a WARN. The Receiver's startup does not check that the seat can run the model,
+so this is where that shows. It says whether the Run failed and why, in the words
+of the log's `[FAILED]` and `[hint]` lines, and whether either allowed call was
+denied, which would mean the organisation's managed permission rules override the
+Run's own. Its working directory, and so its Transcript, stay under the runs
+directory, as a Run's do.
 
 Every line it prints is one of these, for a person at a terminal and for the
 setup skill to parse:
@@ -153,6 +159,7 @@ from grafana_jsm_sandbox.configure import (
     check_issue_type,
     check_permissions,
     check_project,
+    check_queue,
     check_resolution,
     check_statuses,
     clipped,
@@ -1066,6 +1073,16 @@ def facts(laptop: Laptop) -> list[Line]:
             attempt(found, "create screen", check_fields, jira_as, key, incident, has_component)
         attempt(found, "statuses", check_statuses, jira_as, key, incident, project, False)
         attempt(found, "resolution", check_resolution, jira_as)
+        attempt(
+            found,
+            "service desk",
+            check_queue,
+            jira_as,
+            key,
+            project_id_of(jira_as, key),
+            site,
+            project.queue_url or "",
+        )
     except FileNotFoundError:
         return [
             Line(
@@ -1077,19 +1094,43 @@ def facts(laptop: Laptop) -> list[Line]:
         ]
     lines = [Line.of(FACTS, check) for check in found.checks]
     lines += held_to_env(values, found.facts)
-    if values.get(QUEUE_URL_VARIABLE, "").strip():
-        lines.append(Line(FACTS, OK, "queue url", f"{QUEUE_URL_VARIABLE} is set"))
-    else:
-        lines.append(
-            Line(
-                FACTS,
-                WARN,
-                "queue url",
-                f"{QUEUE_URL_VARIABLE} is empty, so the runbook and verify have no queue to open: "
-                f"`{CONFIGURE} --write`",
-            )
-        )
+    lines.append(queue_url_line(project.queue_url, QUEUE_URL_VARIABLE in found.facts))
     return lines
+
+
+def project_id_of(jira_as: JiraAs, key: str) -> str:
+    """The project's id, as `configure` reads it, or empty when Jira would not say.
+
+    A queue's JQL may name the project by id as well as by key, and `check_queue` accepts
+    both only when it is given the id, so `doctor` and `configure` must give it the same.
+    """
+    try:
+        return str(as_dict(call(jira_as, "getProject", "--project-id-or-key", key)).get("id") or "")
+    except JiraRefused:
+        return ""
+
+
+def queue_url_line(queue_url: str | None, discoverable: bool) -> Line:
+    """Whether `.env` has the queue's address, and how to get it there when it has not.
+
+    `configure --write` is advised only when `configure` found the queue, which is what
+    `discoverable` says. When it found none, or Jira would not say, running it again
+    writes nothing, so the address is the engineer's to copy from the queue itself.
+    """
+    if queue_url:
+        return Line(FACTS, OK, "queue url", f"{QUEUE_URL_VARIABLE} is set")
+    empty = f"{QUEUE_URL_VARIABLE} is empty, so the runbook and verify have no queue to open"
+    if discoverable:
+        return Line(FACTS, WARN, "queue url", f"{empty}: `{CONFIGURE} --write`")
+    return Line(
+        FACTS,
+        WARN,
+        "queue url",
+        f"{empty}, and `{CONFIGURE}` cannot find it for you: set it by hand, from the project's "
+        "Queues, by clicking the one that shows its open Incidents and copying its address "
+        f"into {QUEUE_URL_VARIABLE} in .env (the `queue` lines above list the candidates); "
+        f"`{CONFIGURE}` then checks it",
+    )
 
 
 def held_to_env(values: Mapping[str, str], found: Mapping[str, str]) -> list[Line]:
@@ -1831,6 +1872,89 @@ def transcript_events(path: Path) -> list[dict]:
     return events
 
 
+SYNTHETIC = "<synthetic>"
+"""The model Claude Code names on a message it wrote itself, a refusal's among them."""
+
+DATED = re.compile(r"-\d{8}")
+"""How a full model name ends when it is pinned to a release: `claude-haiku-4-5-20251001`."""
+
+
+def models_that_answered(events: Iterable[dict]) -> list[str]:
+    """The models the Transcript's assistant messages name, in the order each first spoke.
+
+    That is what the API served, where the init event only says what Claude Code started
+    with. A message Claude Code wrote itself, such as a refusal, names no model.
+    """
+    answered: list[str] = []
+    for event in events:
+        if event.get("type") != "assistant":
+            continue
+        name = as_dict(event.get("message")).get("model")
+        if isinstance(name, str) and name and name != SYNTHETIC and name not in answered:
+            answered.append(name)
+    return answered
+
+
+def spelled(model: str) -> str:
+    """A model name as Claude Code resolves it: lower case, with a hyphen for each dot and
+    without a context-window suffix such as `[1m]`."""
+    return model.partition("[")[0].strip().lower().replace(".", "-")
+
+
+def same_model(requested: str, ran: str) -> bool:
+    """Whether `ran` is `requested` under another spelling: the dotted form of the name, the
+    name pinned to a release, or an alias (`opus`) resolved to a full name."""
+    asked, got = spelled(requested), spelled(ran)
+    return (
+        asked == got
+        or (got.startswith(f"{asked}-") and DATED.fullmatch(got[len(asked) :]) is not None)
+        or ("-" not in asked and asked in got.split("-"))
+    )
+
+
+def model_line(requested: str, reported: str, answered: Sequence[str]) -> Line:
+    """The model the Run asked for, beside the one that ran, and what any difference means.
+
+    `answered` is what the Transcript's messages name: the model the API served. When none
+    names one, `reported`, what Claude Code says it started with, is all there is. The same
+    name is OK. So is an alias that resolved, or a name that was spelled another way: the
+    line gives the full name, so `RUN_MODEL` can pin it. Any other model is the seat
+    choosing for the Run, or a name that is not quite a model's, and is a WARN.
+    """
+    ran = list(answered) or [reported]
+    shown = ", ".join(ran)
+    verb = "ran" if answered else "Claude Code reports"
+    if any(not same_model(requested, model) for model in ran):
+        return Line(
+            MODEL,
+            WARN,
+            "model",
+            f"requested {requested}, but {verb} {shown}: that is not the same model, so the seat "
+            f"chose for the Run, or {requested} is misspelled; set RUN_MODEL in .env to a model "
+            "the seat can run, then `docker compose up -d demo`",
+        )
+    if not answered:
+        return Line(
+            MODEL,
+            WARN,
+            "model",
+            f"requested {requested}; no model answered the Run, so which one ran is not known "
+            f"(Claude Code reports {reported}, which is what it started with)",
+        )
+    if all(model == requested for model in ran):
+        return Line(MODEL, OK, "model", f"requested {requested}, {verb} {shown}")
+    # A context window the presenter asked for, `[1m]`, is not part of the name the Run reports,
+    # and `RUN_MODEL` without it would run the model with a smaller one.
+    window = requested[requested.index("[") :] if "[" in requested else ""
+    return Line(
+        MODEL,
+        OK,
+        "model",
+        f"requested {requested}, {verb} {shown}: the same model, as Claude Code names it; "
+        f"RUN_MODEL={ran[0]}{window} pins it",
+    )
+
+
 def blocks(events: Iterable[dict], kind: str, block: str) -> list[dict]:
     """The content blocks of one kind in every event of one type."""
     return [
@@ -1866,19 +1990,9 @@ def judged(
     )
     result = next((e for e in reversed(events) if e.get("type") == "result"), None)
     if init is not None:
-        got = str(init.get("model") or "unknown")
-        if got == requested:
-            lines.append(Line(MODEL, OK, "model", f"the Run asked for {requested} and ran it"))
-        else:
-            lines.append(
-                Line(
-                    MODEL,
-                    WARN,
-                    "model",
-                    f"the Run asked for {requested} and Claude Code reports {got}: an alias resolves "
-                    "to a full name, but anything else is the seat choosing for it",
-                )
-            )
+        lines.append(
+            model_line(requested, str(init.get("model") or "unknown"), models_that_answered(events))
+        )
     denied = {
         str(as_dict(denial).get("tool_use_id"))
         for denial in as_list(as_dict(result).get("permission_denials"))

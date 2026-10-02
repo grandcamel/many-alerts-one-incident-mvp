@@ -77,6 +77,10 @@ RUN_MODEL_VARIABLE = "RUN_MODEL"
 alias Claude Code knows or a model's full name. A seat that may not use it fails each Run with
 a hint that names this variable."""
 
+MODEL_PREFLIGHT = "python3 -m grafana_jsm_sandbox.doctor --only stack --with-model"
+"""The command that asks the seat for one short Run on `RUN_MODEL` and reports the model it
+asked for beside the one that ran. Startup does not do that, so the log names it."""
+
 RUN_BUDGET_VARIABLE = "RUN_BUDGET_USD"
 """The most one Run may spend, in dollars, passed as Claude Code's `--max-budget-usd`. Unset
 means no cap beyond the Run's timeout. Claude Code checks it against its own estimate of what
@@ -201,7 +205,8 @@ def log_run_knobs(settings: Settings) -> None:
 
     Said once at startup, before any Alert, so a presenter reading the log can tell
     a model the seat cannot use, or a missing cap, from the Run that then fails.
-    The credential is named by kind and variable, never by value.
+    The credential is named by kind and variable, never by value. The model is only
+    named, not tried: whether the seat can run it is what `MODEL_PREFLIGHT` finds out.
     """
     logger.info(
         "runs authenticate with %s (%s)",
@@ -209,6 +214,12 @@ def log_run_knobs(settings: Settings) -> None:
         settings.model_credential.variable,
     )
     logger.info("runs use model %s (%s)", settings.run_model, RUN_MODEL_VARIABLE)
+    logger.info(
+        "startup does not check that the Claude seat can run %s; before a demo on a model not "
+        "tried yet, run `%s` on the laptop, which says which model ran",
+        settings.run_model,
+        MODEL_PREFLIGHT,
+    )
     logger.info("runs time out after %ss (%s)", settings.run_timeout, RUN_TIMEOUT_VARIABLE)
     logger.info(
         "runs settle for %ss after the previous run (%s)",
