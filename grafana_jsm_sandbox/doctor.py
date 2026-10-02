@@ -1805,7 +1805,7 @@ class _Nowhere:
 
     url = NOWHERE
 
-    def set_sentinel(self, sentinel: str) -> None:
+    def set_sentinel(self, sentinel: str, create_fields: dict | None = None) -> None:
         pass
 
     def clear_sentinel(self) -> None:

@@ -26,6 +26,7 @@ from grafana_jsm_sandbox.forwarder import (
     JiraCredential,
     diagnose,
 )
+from grafana_jsm_sandbox.incident_payload import Facts, create_fields, group_from_notification
 from tests.conftest import REAL_EMAIL, REAL_TOKEN, Response, basic_auth_header, http_request
 
 SENTINEL = "sentinel-for-this-run"
@@ -53,7 +54,7 @@ def raw_request(forwarder, target, method="GET", sentinel=SENTINEL, body=None) -
 def test_request_with_the_active_sentinel_reaches_upstream_with_the_real_credential(
     forwarder, upstream
 ):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     response = jira_request(forwarder)
 
@@ -68,7 +69,7 @@ def test_request_with_the_active_sentinel_reaches_upstream_with_the_real_credent
 def test_request_without_the_active_sentinel_is_refused_and_never_reaches_upstream(
     forwarder, upstream
 ):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     response = jira_request(forwarder, sentinel="a-guess")
 
@@ -79,7 +80,7 @@ def test_request_without_the_active_sentinel_is_refused_and_never_reaches_upstre
 def test_request_with_no_credential_at_all_is_refused_and_never_reaches_upstream(
     forwarder, upstream
 ):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     response = jira_request(forwarder, sentinel=None)
 
@@ -88,7 +89,7 @@ def test_request_with_no_credential_at_all_is_refused_and_never_reaches_upstream
 
 
 def test_sentinel_of_a_finished_run_is_refused_once_it_is_cleared(forwarder, upstream):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
     assert jira_request(forwarder).status == 200
 
     forwarder.clear_sentinel()
@@ -98,8 +99,8 @@ def test_sentinel_of_a_finished_run_is_refused_once_it_is_cleared(forwarder, ups
 
 
 def test_sentinel_of_a_previous_run_is_refused_once_the_next_run_replaces_it(forwarder, upstream):
-    forwarder.set_sentinel("sentinel-of-the-previous-run")
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel("sentinel-of-the-previous-run", json.loads(ISSUE_BODY)["fields"])
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     assert jira_request(forwarder, sentinel="sentinel-of-the-previous-run").status == 401
     assert jira_request(forwarder).status == 200
@@ -120,7 +121,7 @@ def test_no_request_is_forwarded_before_any_run_has_registered_a_sentinel(forwar
     ],
 )
 def test_method_path_and_body_reach_upstream_unchanged(forwarder, upstream, method, body):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     jira_request(
         forwarder,
@@ -142,7 +143,7 @@ def test_upstream_status_headers_and_body_pass_back_unchanged(forwarder, upstrea
     upstream.status = 201
     upstream.body = b'{"key": "OPS-12"}'
     upstream.headers = {"Content-Type": "application/json", "X-AREQUESTID": "abc123"}
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     response = jira_request(forwarder, method="POST", data=b"{}", content_type="application/json")
 
@@ -155,7 +156,7 @@ def test_upstream_status_headers_and_body_pass_back_unchanged(forwarder, upstrea
 def test_an_upstream_error_passes_back_rather_than_becoming_a_forwarder_error(forwarder, upstream):
     upstream.status = 404
     upstream.body = b'{"errorMessages": ["Issue does not exist"]}'
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     response = jira_request(forwarder, path="/rest/api/3/issue/OPS-999")
 
@@ -167,7 +168,7 @@ def test_no_log_line_carries_the_real_token_the_sentinel_or_an_authorization_hea
     forwarder, upstream, caplog
 ):
     caplog.set_level(logging.DEBUG)
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     jira_request(forwarder, method="POST", data=b"{}", content_type="application/json")
     jira_request(forwarder, path="/rest/api/3/myself", sentinel="a-guess")
@@ -246,7 +247,7 @@ def test_forwarder_listens_on_loopback(forwarder):
 
 def test_the_upstream_host_comes_from_configuration_and_never_from_the_request(forwarder, upstream):
     """A proxy-style absolute request target must not choose the Forwarder's upstream."""
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     response = raw_request(forwarder, "http://not-the-configured-site.invalid/rest/api/3/myself")
 
@@ -260,7 +261,7 @@ def test_a_redirect_is_handed_back_rather_than_followed_with_the_real_credential
     upstream.status = 302
     upstream.body = b""
     upstream.headers = {"Location": "https://not-the-configured-site.invalid/"}
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     response = raw_request(forwarder, "/rest/api/3/search")
 
@@ -278,7 +279,7 @@ def test_an_unreachable_upstream_becomes_a_gateway_error_rather_than_a_dropped_c
     forwarder = Forwarder(
         JiraCredential(site_url=nothing_is_listening, email=REAL_EMAIL, api_token=REAL_TOKEN)
     )
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
     forwarder.start()
     try:
         response = jira_request(forwarder)
@@ -307,7 +308,7 @@ def test_localhost_is_a_loopback_host_the_forwarder_will_bind(upstream):
     ],
 )
 def test_a_password_that_is_not_a_sentinel_at_all_is_refused(forwarder, upstream, presented):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     response = jira_request(forwarder, sentinel=presented)
 
@@ -316,7 +317,7 @@ def test_a_password_that_is_not_a_sentinel_at_all_is_refused(forwarder, upstream
 
 
 def test_an_authorization_header_that_is_not_basic_auth_is_refused(forwarder, upstream):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     response = http_request(
         forwarder.url + "/rest/api/3/myself",
@@ -353,7 +354,7 @@ def test_a_known_upstream_refusal_is_a_warning_that_says_what_it_likely_means(
 ):
     caplog.set_level(logging.INFO)
     upstream.status, upstream.body = status, body
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     response = jira_request(forwarder, path="/rest/api/3/myself")
 
@@ -368,7 +369,7 @@ def test_a_known_upstream_refusal_is_a_warning_that_says_what_it_likely_means(
 def test_another_upstream_error_is_a_warning_without_a_diagnosis(forwarder, upstream, caplog):
     caplog.set_level(logging.INFO)
     upstream.status, upstream.body = 500, b"oops"
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     jira_request(forwarder)
 
@@ -379,7 +380,7 @@ def test_another_upstream_error_is_a_warning_without_a_diagnosis(forwarder, upst
 
 def test_a_success_stays_an_info_line(forwarder, upstream, caplog):
     caplog.set_level(logging.INFO)
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     jira_request(forwarder)
 
@@ -391,7 +392,7 @@ def test_a_success_stays_an_info_line(forwarder, upstream, caplog):
 def test_an_upstream_error_body_is_searched_and_never_logged(forwarder, upstream, caplog):
     caplog.set_level(logging.DEBUG)
     upstream.status, upstream.body = 403, IP_REFUSAL
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     jira_request(forwarder)
 
@@ -464,32 +465,12 @@ def incident_body(**fields) -> bytes:
     body = {
         "project": {"key": "DEMO"},
         "issuetype": {"name": "Incident"},
-        "summary": "checkout-outage: 2 alerts firing",
-        "description": {
-            "type": "doc",
-            "version": 1,
-            "content": [
-                {
-                    "type": "paragraph",
-                    "content": [{"type": "text", "text": "Partial Report: 2 alerts firing."}],
-                },
-                {
-                    "type": "bulletList",
-                    "content": [
-                        {
-                            "type": "listItem",
-                            "content": [
-                                {
-                                    "type": "paragraph",
-                                    "content": [{"type": "text", "text": "HighLatency on web-1"}],
-                                }
-                            ],
-                        }
-                    ],
-                },
-            ],
-        },
-        "labels": ["grp-checkout-outage", "ses-demo", "fp-0a1b2c"],
+        **create_fields(group_from_notification({
+            "groupLabels": {"incident_group": "checkout-outage"},
+            "alerts": [{"fingerprint": "0a1b2c", "status": "firing",
+                        "labels": {"alertname": "HighLatency", "instance": "web-1"},
+                        "values": {"A": 7}, "generatorURL": "https://example.invalid/alert"}],
+        }), Facts("DEMO", "ses-demo", None, None, None, "Completed")),
     }
     body.update(fields)
     return json.dumps({"fields": {k: v for k, v in body.items() if v is not None}}).encode()
@@ -551,7 +532,7 @@ def test_the_first_create_is_forwarded_and_the_second_is_refused_without_reachin
 ):
     upstream.status = 201
     upstream.body = b'{"key": "OPS-12"}'
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     first = create_request(forwarder)
     second = create_request(forwarder)
@@ -565,20 +546,20 @@ def test_the_first_create_is_forwarded_and_the_second_is_refused_without_reachin
 
 
 @pytest.mark.parametrize("path", CREATE_PATHS)
-def test_every_create_path_is_forwarded_once_and_then_refused(forwarder, upstream, path):
-    forwarder.set_sentinel(SENTINEL)
+def test_every_create_path_spends_the_attempt_and_only_single_creates_are_forwarded(forwarder, upstream, path):
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
-    assert create_request(forwarder, path).status == 200
+    allowed = path in ("/rest/api/2/issue", "/rest/api/3/issue", "/rest/api/latest/issue")
+    assert create_request(forwarder, path).status == (200 if allowed else 400)
     assert create_request(forwarder, path).status == 409
-
-    assert [request.path for request in upstream.received] == [path]
+    assert [request.path for request in upstream.received] == ([path] if allowed else [])
 
 
 @pytest.mark.parametrize("second", CREATE_PATHS[1:])
 def test_a_create_on_one_path_spends_the_attempt_for_every_other_create_path(
     forwarder, upstream, second
 ):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     assert create_request(forwarder, "/rest/api/3/issue").status == 200
     assert create_request(forwarder, second).status == 409
@@ -588,7 +569,7 @@ def test_a_create_on_one_path_spends_the_attempt_for_every_other_create_path(
 
 @pytest.mark.parametrize("variant", VARIANTS_OF_THE_ISSUE_PATH)
 def test_another_spelling_of_the_create_path_is_still_a_create(forwarder, upstream, variant):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     assert create_request(forwarder).status == 200
     assert create_request(forwarder, variant).status == 409
@@ -599,7 +580,7 @@ def test_another_spelling_of_the_create_path_is_still_a_create(forwarder, upstre
 def test_a_create_sent_as_a_proxy_style_absolute_request_target_is_still_a_create(
     forwarder, upstream
 ):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     assert raw_request(forwarder, "/rest/api/3/issue", method="POST", body=ISSUE_BODY).status == 200
     refused = raw_request(
@@ -616,7 +597,7 @@ def test_a_create_sent_as_a_proxy_style_absolute_request_target_is_still_a_creat
 @pytest.mark.parametrize("status", [201, 400, 403, 404, 429, 500, 502])
 def test_the_first_create_is_the_attempt_whatever_upstream_answers(forwarder, upstream, status):
     upstream.status, upstream.body = status, b'{"errorMessages": ["no"], "errors": {}}'
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     first = create_request(forwarder)
     upstream.status = 201
@@ -635,7 +616,7 @@ def test_a_create_that_could_not_reach_upstream_is_still_the_attempt():
     forwarder = Forwarder(
         JiraCredential(site_url=nothing_is_listening, email=REAL_EMAIL, api_token=REAL_TOKEN)
     )
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
     forwarder.start()
     try:
         first = create_request(forwarder)
@@ -650,7 +631,7 @@ def test_a_create_that_could_not_reach_upstream_is_still_the_attempt():
 def test_the_refusal_is_plain_text_a_jira_client_can_print_and_never_a_forwarder_error(
     forwarder, upstream
 ):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
     create_request(forwarder)
 
     message = refusal_message(create_request(forwarder))
@@ -687,7 +668,7 @@ def test_the_refusal_is_plain_text_a_jira_client_can_print_and_never_a_forwarder
 def test_nothing_but_a_post_that_creates_is_counted_or_refused(forwarder, upstream, method, path):
     """Comments, label edits, transitions, searches and reads go through as often as a Run likes,
     before the create and after it, and none of them spends the attempt."""
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     def send():
         return jira_request(
@@ -707,7 +688,7 @@ def test_nothing_but_a_post_that_creates_is_counted_or_refused(forwarder, upstre
 def test_a_create_with_the_wrong_sentinel_is_refused_and_does_not_spend_the_attempt(
     forwarder, upstream
 ):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     assert create_request(forwarder, sentinel="a-guess").status == 401
     assert create_request(forwarder, sentinel=None).status == 401
@@ -717,7 +698,7 @@ def test_a_create_with_the_wrong_sentinel_is_refused_and_does_not_spend_the_atte
 
 
 def test_a_second_create_after_the_sentinel_is_cleared_is_a_plain_refusal(forwarder, upstream):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
     create_request(forwarder)
     forwarder.clear_sentinel()
 
@@ -726,11 +707,11 @@ def test_a_second_create_after_the_sentinel_is_cleared_is_a_plain_refusal(forwar
 
 
 def test_a_new_sentinel_starts_its_run_with_a_create_attempt_to_spend(forwarder, upstream):
-    forwarder.set_sentinel("sentinel-of-the-previous-run")
+    forwarder.set_sentinel("sentinel-of-the-previous-run", json.loads(ISSUE_BODY)["fields"])
     assert create_request(forwarder, sentinel="sentinel-of-the-previous-run").status == 200
     assert create_request(forwarder, sentinel="sentinel-of-the-previous-run").status == 409
 
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     assert create_request(forwarder).status == 200
     assert create_request(forwarder).status == 409
@@ -739,10 +720,10 @@ def test_a_new_sentinel_starts_its_run_with_a_create_attempt_to_spend(forwarder,
 
 
 def test_clearing_the_sentinel_ends_the_count_so_the_next_run_starts_at_zero(forwarder, upstream):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
     create_request(forwarder)
     forwarder.clear_sentinel()
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     assert create_request(forwarder).status == 200
     assert len(upstream.received) == 2
@@ -761,7 +742,7 @@ def test_creates_racing_under_one_sentinel_let_exactly_one_through(
         return send_upstream(*args, **kwargs)
 
     monkeypatch.setattr(forwarder, "_send_upstream", slow)
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
     start = threading.Barrier(racers)
     statuses: list[int] = []
 
@@ -808,7 +789,7 @@ def test_the_check_and_the_spending_of_the_attempt_cannot_be_split_between_threa
     sys.setswitchinterval(1e-6)
     try:
         for _ in range(200):
-            forwarder.set_sentinel(SENTINEL)
+            forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
             assert sorted(create_races(forwarder, headers, racers=6)) == [200] + [409] * 5
     finally:
@@ -819,7 +800,7 @@ def test_a_refused_create_is_a_warning_that_says_why_and_carries_no_credential(
     forwarder, upstream, caplog
 ):
     caplog.set_level(logging.DEBUG)
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
     create_request(forwarder)
 
     create_request(forwarder)
@@ -836,7 +817,7 @@ def test_a_refused_create_is_a_warning_that_says_why_and_carries_no_credential(
 
 
 def paragraph_only_description() -> dict:
-    """What jira-as makes of `--description Test`: one plain paragraph, no bullet list."""
+    """What jira-as makes of `--description Test`: one plain paragraph."""
     return {
         "type": "doc",
         "version": 1,
@@ -856,53 +837,53 @@ def a_bullet_list(items=1) -> dict:
 
 INCOMPLETE_CREATES = [
     pytest.param(
-        incident_body(description=paragraph_only_description()), "bullet list", id="haiku-test"
+        incident_body(description=paragraph_only_description()), "fields.description", id="haiku-test"
     ),
-    pytest.param(incident_body(description="Test"), "bullet list", id="description-as-text"),
+    pytest.param(incident_body(description="Test"), "fields.description", id="description-as-text"),
     pytest.param(
         incident_body(description=json.dumps(json.loads(ISSUE_BODY)["fields"]["description"])),
-        "bullet list",
+        "fields.description",
         id="adf-sent-as-a-string",
     ),
-    pytest.param(incident_body(description=None), "bullet list", id="no-description"),
+    pytest.param(incident_body(description=None), "fields.description", id="no-description"),
     pytest.param(
         incident_body(description={"type": "doc", "version": 1, "content": []}),
-        "bullet list",
+        "fields.description",
         id="empty-document",
     ),
     pytest.param(
         incident_body(description={"type": "doc", "content": [a_bullet_list(items=0)]}),
-        "bullet list",
+        "fields.description",
         id="empty-bullet-list",
     ),
     pytest.param(
         incident_body(description={"type": "paragraph", "content": [a_bullet_list()]}),
-        "bullet list",
+        "fields.description",
         id="not-a-document",
     ),
     pytest.param(
         incident_body(description={"type": "doc", "content": {"type": "bulletList"}}),
-        "bullet list",
+        "fields.description",
         id="content-not-a-list",
     ),
     pytest.param(
         incident_body(description={"type": "doc", "content": [a_bullet_list()], "x": 1}),
-        None,
-        id="control-this-one-is-complete",
+        "fields.description",
+        id="extra-adf-field",
     ),
     pytest.param(
-        incident_body(labels=["ses-demo", "fp-0a1b2c"]), "group label", id="no-group-label"
+        incident_body(labels=["ses-demo", "fp-0a1b2c"]), "fields.labels", id="no-group-label"
     ),
     pytest.param(
         incident_body(labels=["grp-checkout-outage", "fp-0a1b2c"]),
-        "session label",
+        "fields.labels",
         id="no-session-label",
     ),
-    pytest.param(incident_body(labels=None), "group label", id="no-labels"),
+    pytest.param(incident_body(labels=None), "fields.labels", id="no-labels"),
     pytest.param(
-        incident_body(labels="grp-checkout-outage,ses-demo"), "group label", id="labels-as-text"
+        incident_body(labels="grp-checkout-outage,ses-demo"), "fields.labels", id="labels-as-text"
     ),
-    pytest.param(incident_body(labels=[7, None]), "group label", id="labels-not-text"),
+    pytest.param(incident_body(labels=[7, None]), "fields.labels", id="labels-not-text"),
     pytest.param(b'{"fields": {"summary": "x"}', "is not JSON", id="truncated-json"),
     pytest.param(b"", "is not JSON", id="empty-body"),
     pytest.param(b"\xff\xfe\x00", "is not JSON", id="not-text"),
@@ -924,7 +905,7 @@ INCOMPLETE_CREATES = [
 """A create body and what it lacks. The first row is the case the findings recorded: jira-as
 sent `-d Test` as the Run's first create, so it was the one attempt, and made an Incident whose
 Description was `Test`. jira-as passes any JSON object given as `--description` through as ADF,
-so only the Forwarder reads whether a bullet list is in it."""
+so the Forwarder compares the content with the registered payload."""
 
 
 def forwarder_says(response) -> str:
@@ -938,7 +919,7 @@ def forwarder_says(response) -> str:
 def test_a_create_without_an_incidents_content_is_refused_and_never_reaches_upstream(
     forwarder, upstream, body, lacks
 ):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     response = jira_request(
         forwarder,
@@ -963,7 +944,7 @@ def test_a_create_without_an_incidents_content_is_refused_and_never_reaches_upst
 def test_a_refused_create_spends_the_attempt_so_the_run_cannot_try_again(
     forwarder, upstream, body, lacks
 ):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     first = jira_request(
         forwarder,
@@ -982,7 +963,7 @@ def test_a_refused_create_spends_the_attempt_so_the_run_cannot_try_again(
 
 @pytest.mark.parametrize("path", CREATE_PATHS)
 def test_the_content_check_reads_every_create_path_the_same_way(forwarder, upstream, path):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     first = jira_request(
         forwarder,
@@ -999,7 +980,7 @@ def test_the_content_check_reads_every_create_path_the_same_way(forwarder, upstr
 def test_a_complete_create_is_forwarded_unchanged_with_every_other_field_it_carries(
     forwarder, upstream
 ):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
     body = incident_body(customfield_10010="1", components=[{"name": "rolldice"}])
 
     response = create_request_with(forwarder, body)
@@ -1016,7 +997,7 @@ def create_request_with(forwarder, body, path="/rest/api/3/issue"):
 
 def test_only_a_create_is_read_for_content(forwarder, upstream):
     """A comment, an edit or a transition has no Description and is not asked for one."""
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     comment = create_request_with(
         forwarder, b'{"body": "Update: 2 firing."}', path="/rest/api/3/issue/OPS-12/comment"
@@ -1036,7 +1017,7 @@ def test_a_refused_create_is_a_warning_that_names_what_is_missing_and_carries_no
     forwarder, upstream, caplog
 ):
     caplog.set_level(logging.DEBUG)
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     create_request_with(forwarder, incident_body(description="Test"))
 
@@ -1044,7 +1025,7 @@ def test_a_refused_create_is_a_warning_that_names_what_is_missing_and_carries_no
     assert record.levelno == logging.WARNING
     assert record.getMessage() == (
         f"refused a POST /rest/api/3/issue: {CREATE_INCOMPLETE} "
-        "(its description is not a document with a bullet list)"
+        "(its fields.description differs from the registered create)"
     )
     assert "Test" not in record.getMessage()
     assert REAL_TOKEN not in caplog.text
@@ -1055,17 +1036,17 @@ def test_a_refused_create_is_a_warning_that_names_what_is_missing_and_carries_no
 def test_the_refusal_of_an_incomplete_create_is_short_enough_for_the_log_and_hides_no_secret(
     forwarder, upstream
 ):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     message = forwarder_says(create_request_with(forwarder, incident_body(description="Test")))
 
-    assert len(message) < 220, "jira-as prefixes it, and the log shows a line only so wide"
+    assert len(message) < 250, "jira-as prefixes it, and the log shows a line only so wide"
     assert REAL_TOKEN not in message
     assert SENTINEL not in message
 
 
 def test_a_run_whose_create_was_refused_may_still_comment_edit_and_search(forwarder, upstream):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
     create_request_with(forwarder, incident_body(description="Test"))
 
     assert jira_request(forwarder, path="/rest/api/3/search/jql").status == 200
@@ -1075,7 +1056,7 @@ def test_a_run_whose_create_was_refused_may_still_comment_edit_and_search(forwar
 
 
 def test_the_forwarder_keeps_serving_after_a_body_nested_past_the_jsons_depth(forwarder, upstream):
-    forwarder.set_sentinel(SENTINEL)
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
 
     refused = create_request_with(forwarder, b"[" * 100_000)
 
@@ -1089,3 +1070,116 @@ def test_the_label_prefixes_are_the_ones_the_demo_and_its_verification_spell():
 
     assert SESSION_LABEL_PREFIX == demos_session_prefix
     assert GROUP_LABEL_PREFIX == verifys_group_prefix
+
+
+@pytest.fixture
+def content_forwarder(monkeypatch):
+    """The real admission path with its listener and upstream replaced; no sockets."""
+    monkeypatch.setattr("grafana_jsm_sandbox.forwarder.ThreadingHTTPServer", lambda *args: None)
+    forwarder = Forwarder(JiraCredential("https://example.invalid", REAL_EMAIL, REAL_TOKEN))
+    sent = []
+
+    def upstream(*args):
+        sent.append(args)
+        return 201, {}, b'{"key": "DEMO-12"}'
+
+    monkeypatch.setattr(forwarder, "_send_upstream", upstream)
+    return forwarder, sent
+
+
+def local_create(forwarder, body=ISSUE_BODY, path="/rest/api/3/issue"):
+    headers = Message()
+    headers["Authorization"] = basic_auth_header(REAL_EMAIL, SENTINEL)
+    return forwarder.handle("POST", path, headers, body)
+
+
+@pytest.mark.parametrize("body, field", [
+    (incident_body(description="Test"), "description"),
+    (incident_body(description={"type": "doc", "version": 1, "content": [{
+        "type": "bulletList", "content": [{"type": "listItem", "content": [{
+            "type": "paragraph", "content": [{"type": "text", "text": "Test"}],
+        }]}],
+    }]}), "description"),
+    (incident_body(labels=["grp-checkout-outage", "ses-demo"]), "labels"),
+    (incident_body(labels=["grp-checkout-outage", "ses-demo", "fp-0a1b2c", "extra"]), "labels"),
+    (incident_body(labels=["grp-other", "ses-other", "fp-0a1b2c"]), "labels"),
+    (incident_body(summary="Test"), "summary"),
+])
+def test_registered_create_refuses_placeholders_and_different_fields(content_forwarder, body, field):
+    forwarder, sent = content_forwarder
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
+
+    status, _, response = local_create(forwarder, body)
+
+    assert status == 400
+    assert f"fields.{field}" in json.loads(response)["errorMessages"][0]
+    assert json.loads(response)["errors"] == {}
+    assert local_create(forwarder)[0] == 409
+    assert sent == []
+
+
+@pytest.mark.parametrize("path", [
+    "/rest/api/2/issue/bulk", "/rest/api/3/issue/bulk", "/rest/api/latest/issue/bulk",
+    "/rest/servicedeskapi/request", "/rest/API/3/%69ssue//bulk/;x=1?x=1",
+    "/rest/servicedeskapi/./request/",
+])
+def test_bulk_and_service_management_decoys_never_go_upstream(content_forwarder, path):
+    forwarder, sent = content_forwarder
+    create = json.loads(ISSUE_BODY)
+    forwarder.set_sentinel(SENTINEL, create["fields"])
+    decoy = json.dumps({"fields": create["fields"], "issueUpdates": [create, create]}).encode()
+
+    status, _, response = local_create(forwarder, decoy, path)
+
+    assert status == 400
+    assert "only single-issue creates" in json.loads(response)["errorMessages"][0]
+    assert json.loads(response)["errors"] == {}
+    assert local_create(forwarder)[0] == 409
+    assert sent == []
+
+
+def test_registered_content_is_a_snapshot_and_labels_are_compared_as_a_set(content_forwarder):
+    forwarder, sent = content_forwarder
+    expected = json.loads(ISSUE_BODY)["fields"]
+    forwarder.set_sentinel(SENTINEL, expected)
+    expected["description"]["content"].clear()
+    expected["labels"].clear()
+    body = json.loads(ISSUE_BODY)
+    body["fields"]["labels"].reverse()
+    body["fields"]["labels"].append("ses-demo")
+    body["fields"]["customfield_10001"] = "anything"
+    wire = json.dumps(body, sort_keys=True).encode()
+
+    assert local_create(forwarder, wire)[0] == 201
+    assert sent[0][3] == wire
+    assert local_create(forwarder, wire)[0] == 409
+    assert len(sent) == 1
+
+
+def test_no_registered_content_refuses_every_create(content_forwarder):
+    forwarder, sent = content_forwarder
+    forwarder.set_sentinel(SENTINEL)
+
+    assert local_create(forwarder)[0] == 400
+    assert local_create(forwarder)[0] == 409
+    assert sent == []
+
+
+def test_clearing_the_sentinel_clears_its_registered_content(content_forwarder):
+    forwarder, sent = content_forwarder
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
+    forwarder.clear_sentinel()
+    assert local_create(forwarder)[0] == 401
+    forwarder.set_sentinel(SENTINEL)
+    assert local_create(forwarder)[0] == 400
+    assert sent == []
+
+
+def test_registered_create_races_admit_exactly_once_without_sockets(content_forwarder):
+    forwarder, sent = content_forwarder
+    forwarder.set_sentinel(SENTINEL, json.loads(ISSUE_BODY)["fields"])
+    headers = Message()
+    headers["Authorization"] = basic_auth_header(REAL_EMAIL, SENTINEL)
+
+    assert sorted(create_races(forwarder, headers, racers=8)) == [201] + [409] * 7
+    assert len(sent) == 1

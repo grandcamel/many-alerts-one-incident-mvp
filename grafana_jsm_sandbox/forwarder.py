@@ -35,6 +35,7 @@ import urllib.error
 import urllib.request
 import zlib
 from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -222,6 +223,7 @@ class Forwarder:
         self._host = host
         self._sentinel: str | None = None
         self._create_attempted = False
+        self._create_fields: dict | None = None
         self._sentinel_lock = threading.Lock()
         self._server = ThreadingHTTPServer((host, port), _build_handler(self))
         self._thread: threading.Thread | None = None
@@ -248,12 +250,14 @@ class Forwarder:
             self._thread = None
         self._server.server_close()
 
-    def set_sentinel(self, sentinel: str) -> None:
+    def set_sentinel(self, sentinel: str, create_fields: dict | None = None) -> None:
         """Accept this sentinel, and only this one, until it is replaced or cleared.
 
-        It starts with its Run's one create attempt unspent.
+        It starts with its Run's one create attempt unspent. Only the registered
+        create fields can pass; without them every create is refused.
         """
         with self._sentinel_lock:
+            self._create_fields = deepcopy(create_fields)
             self._sentinel = sentinel
             self._create_attempted = False
 
@@ -261,6 +265,7 @@ class Forwarder:
         """Accept nothing. A sentinel from a Run that has ended is worth nothing."""
         with self._sentinel_lock:
             self._sentinel = None
+            self._create_fields = None
             self._create_attempted = False
 
     def handle(
@@ -269,12 +274,12 @@ class Forwarder:
         """Answer one request from a Run: check its sentinel, then forward it upstream.
 
         The first issue create a sentinel presents is that Run's attempt. It is forwarded if
-        its body carries an Incident's content, and answered 400 here if not; either way the
-        attempt is spent, and whatever upstream answers, or whether it answers at all, does
+        its judged fields equal the registered create, and answered 400 here if not. Either
+        way the attempt is spent, and whatever upstream answers, or whether it answers at all, does
         not give it back. Any later one is answered 409 here and goes nowhere.
         """
-        admission = self._admit(
-            _presented_sentinel(headers.get("Authorization")), _creates_an_issue(method, path)
+        admission, problem = self._admit(
+            _presented_sentinel(headers.get("Authorization")), method, path, body
         )
         if admission is _Admission.NOT_THE_SENTINEL:
             logger.warning("refused a %s %s with no valid sentinel", method, path)
@@ -282,11 +287,9 @@ class Forwarder:
         if admission is _Admission.SECOND_CREATE:
             logger.warning("refused a %s %s: %s", method, path, CREATE_REFUSAL)
             return 409, dict(_JSON), CREATE_REFUSED_BODY
-        if admission is _Admission.FIRST_CREATE:
-            problem = missing_from_incident(body)
-            if problem is not None:
-                logger.warning("refused a %s %s: %s (%s)", method, path, CREATE_INCOMPLETE, problem)
-                return 400, dict(_JSON), incomplete_create_body(problem)
+        if admission is _Admission.FIRST_CREATE and problem is not None:
+            logger.warning("refused a %s %s: %s (%s)", method, path, CREATE_INCOMPLETE, problem)
+            return 400, dict(_JSON), incomplete_create_body(problem)
         status, upstream_headers, upstream_body = self._send_upstream(
             method, path, _headers_to_send_upstream(headers), body
         )
@@ -303,25 +306,31 @@ class Forwarder:
             )
         return status, _headers_to_send_back(upstream_headers), upstream_body
 
-    def _admit(self, presented: str | None, creates_an_issue: bool) -> _Admission:
+    def _admit(
+        self, presented: str | None, method: str, path: str, body: bytes
+    ) -> tuple[_Admission, str | None]:
         """Whether this is the sentinel of the Run that is currently allowed to call Jira, and
         if it is creating an issue, whether the Run still has its attempt.
 
-        The check and the spending of the attempt are one step under one lock, so creates
+        The sentinel check, content check and spending are one step under one lock, so creates
         racing on a sentinel cannot both be admitted.
         """
         with self._sentinel_lock:
             sentinel = self._sentinel
             if sentinel is None or presented is None:
-                return _Admission.NOT_THE_SENTINEL
+                return _Admission.NOT_THE_SENTINEL, None
             if not secrets.compare_digest(sentinel, presented):
-                return _Admission.NOT_THE_SENTINEL
-            if creates_an_issue:
+                return _Admission.NOT_THE_SENTINEL, None
+            if _creates_an_issue(method, path):
                 if self._create_attempted:
-                    return _Admission.SECOND_CREATE
+                    return _Admission.SECOND_CREATE, None
                 self._create_attempted = True
-                return _Admission.FIRST_CREATE
-            return _Admission.ADMITTED
+                if not re.fullmatch(r"/rest/api/(?:2|3|latest)/issue", _create_path(path)):
+                    problem = "only single-issue creates are allowed"
+                else:
+                    problem = missing_from_incident(body, self._create_fields)
+                return _Admission.FIRST_CREATE, problem
+            return _Admission.ADMITTED, None
 
     def _send_upstream(
         self, method: str, path: str, headers: dict[str, str], body: bytes
@@ -473,10 +482,15 @@ def _creates_an_issue(method: str, target: str) -> bool:
     """
     if method.upper() != "POST":
         return False
+    return _ISSUE_CREATE_PATH.fullmatch(_create_path(target)) is not None
+
+
+def _create_path(target: str) -> str:
+    """The canonical create path used by both counting and endpoint admission."""
     try:
         path = unquote(urlsplit(target).path)
     except ValueError:
-        return False  # a target that cannot be read is never sent upstream either
+        return ""  # a target that cannot be read is never sent upstream either
     segments: list[str] = []
     for segment in path.split("/"):
         segment = segment.partition(";")[0]
@@ -485,20 +499,13 @@ def _creates_an_issue(method: str, target: str) -> bool:
                 segments.pop()
         elif segment not in ("", "."):
             segments.append(segment)
-    return _ISSUE_CREATE_PATH.fullmatch("/" + "/".join(segments).lower()) is not None
+    return "/" + "/".join(segments).lower()
 
 
-def missing_from_incident(body: bytes) -> str | None:
-    """What a create's body lacks of the Incident the Skill builds, or None when it has all.
-
-    Counting creates does not stop a placeholder: a create jira-as made from a mangled
-    `--description` goes out as the first attempt and makes the Incident, whatever it holds.
-    The body is read as the Skill's create sends it. `fields.description` is an ADF document
-    with a bullet list in it, one item per firing Alert, and `fields.labels` holds the group
-    label and the session label. jira-as passes any JSON object it is given as ADF, so only
-    this check, not jira-as, tells a bullet list from `Test`. A body that is not that shape
-    at all, a bulk create or a Service Management request included, lacks it too.
-    """
+def missing_from_incident(body: bytes, expected: dict | None) -> str | None:
+    """Which field differs from incident-payload's registered create, if any."""
+    if expected is None:
+        return "no create content is registered for this Notification"
     try:
         document = json.loads(body)
     except (ValueError, RecursionError):
@@ -506,28 +513,17 @@ def missing_from_incident(body: bytes) -> str | None:
     fields = document.get("fields") if isinstance(document, dict) else None
     if not isinstance(fields, dict):
         return "its body has no fields object"
-    if not _holds_a_bullet_list(fields.get("description")):
-        return "its description is not a document with a bullet list"
-    given = fields.get("labels")
-    labels = [label for label in given if isinstance(label, str)] if isinstance(given, list) else []
-    for prefix, name in ((GROUP_LABEL_PREFIX, "group"), (SESSION_LABEL_PREFIX, "session")):
-        if not any(label.startswith(prefix) for label in labels):
-            return f"its labels have no {name} label starting {prefix}"
+    for name in ("summary", "description"):
+        if fields.get(name) != expected[name]:
+            return f"its fields.{name} differs from the registered create"
+    labels = fields.get("labels")
+    if (
+        not isinstance(labels, list)
+        or not all(isinstance(label, str) for label in labels)
+        or set(labels) != set(expected["labels"])
+    ):
+        return "its fields.labels differs from the registered create"
     return None
-
-
-def _holds_a_bullet_list(description: object) -> bool:
-    """Whether this is an ADF document with at least one non-empty bullet list at its top."""
-    if not isinstance(description, dict) or description.get("type") != "doc":
-        return False
-    content = description.get("content")
-    return isinstance(content, list) and any(
-        isinstance(node, dict)
-        and node.get("type") == "bulletList"
-        and isinstance(node.get("content"), list)
-        and bool(node["content"])
-        for node in content
-    )
 
 
 def incomplete_create_body(problem: str) -> bytes:

@@ -758,23 +758,27 @@ def test_the_denied_create_is_followed_by_failed_not_by_a_success_line():
     ("result", "reason"),
     [
         pytest.param("failed: no resolution", "no resolution", id="plain"),
-        pytest.param("Failed: no resolution", "no resolution", id="capitalised"),
-        pytest.param("\n  failed:   padded  \nmore", "padded", id="blank-lines-and-padding"),
-        pytest.param("failed:", "no reason given", id="no-reason"),
+        pytest.param("\nfailed:   padded  \nmore", "padded", id="blank-lines-and-padding"),
+        pytest.param("failed: ", "no reason given", id="no-reason"),
     ],
 )
 def test_the_run_reports_failed_by_beginning_its_first_line_with_it(result, reason):
     event = result_event(result=result)
 
     assert run_failure(event) == f"run reported failed: {reason}"
-    assert REPORTED_FAILURE == "failed:"
+    assert REPORTED_FAILURE == "failed: "
 
 
 @pytest.mark.parametrize(
     "result",
     [
-        pytest.param("checkout-outage: created OPS-12", id="a-finish-line"),
-        pytest.param("checkout-outage: created OPS-12\nfailed: one retry", id="a-later-line"),
+        pytest.param("ok: checkout-outage OPS-12 created", id="a-finish-line"),
+        pytest.param("ok: checkout-outage OPS-12 created\nfailed: one retry", id="a-later-line"),
+        pytest.param("ok: failed DEMO-12 created", id="group-named-failed"),
+        pytest.param("FAILED: no resolution", id="uppercase"),
+        pytest.param("Failed: no resolution", id="capitalised"),
+        pytest.param("failed:no resolution", id="missing-space"),
+        pytest.param("  failed: no resolution", id="leading-space"),
         pytest.param("The create failed: but the retry made OPS-12", id="mid-sentence"),
         pytest.param("", id="empty"),
         pytest.param(None, id="no-text"),
@@ -875,3 +879,9 @@ def test_a_rate_limit_event_without_its_details_still_names_its_status():
     event = {"type": "rate_limit_event", "rate_limit_info": {"status": "rejected"}}
 
     assert format_event(event) == ["[limit]  rejected: a rate limit"]
+
+
+@pytest.mark.parametrize("subtype", [None, "unknown"])
+def test_a_failure_prefix_is_read_only_from_a_success_result(subtype):
+    event = result_event(subtype=subtype, result="failed: no resolution")
+    assert run_failure(event) is None

@@ -202,12 +202,12 @@ So **wait 3 minutes after the traffic restart**, which is also `repeat_interval`
 Run's `run … finished` line has appeared in the log. These numbers are derived from the timings above and from how
 Alertmanager is documented to group, not measured.
 
-A take started too early shows it: its first Notification carries resolved Alerts left from the take before. A fresh
-take's first Notification normally carries 2 alerts (`notification accepted: 2 alerts, run … queued`, section 6). A
-Notification that carries more, or a Run whose last lines list a `resolved` Alert, means a group from the earlier take
-was still there. Let the traffic restart, run `reset`, wait the three minutes, give the next take a new id and begin
-again. The Incident that Run opened labels every Alert in its Notification, as the Skill says to, but its Summary and
-Description cover only the firing ones, which reads as confusing on screen.
+A fresh take's first Notification normally carries 2 Alerts (`notification accepted: 2 alerts, run … queued`,
+section 6). More than two is a cue to inspect that Notification, not proof that an earlier group remains: delayed
+delivery or coalescing can bring three or four fresh firing Alerts together. If the Notification actually carries
+resolved Alerts from an earlier take, restart the traffic, run `reset`, wait the three minutes, give the next take a
+new id and begin again. The Incident that Run opened labels every Alert in its Notification, as the Skill says to,
+but its Summary and Description cover only the firing ones, which reads as confusing on screen.
 
 Nothing in the repo reports lingering resolved Alerts before a take. The check above is a wait and a look at the first
 Notification.
@@ -232,6 +232,7 @@ Notification.
    run … started in …
    [tool]   Bash: incident-payload update --key <KEY>-n --labels … --created … --server-time …
    [tool]   Bash: jira-as collaborate comment add <KEY>-n -b 'Update: 4 firing. New: rolldice outage is sustained (fp-…) value=…. Repeat: …'
+   [claude] ok: checkout-outage <KEY>-n updated and moved to <in-progress status>
    [result] success in …
    run … finished with exit status 0 in …
    ```
@@ -266,12 +267,18 @@ Three changes since the first rehearsals show in the log and in Jira.
   `jira-as` call it printed. The allow list is `Bash(jira-as *)`, `Bash(incident-payload *)` and the `Read` of the runs
   directory (ADR 0003's 2026-10-01 amendment).
 - **One create attempt per Run, enforced by the Forwarder.** The first issue create a Run makes is its attempt, and the
-  Forwarder forwards it only when its body carries a Description that is an ADF document with a bullet list, and a
-  `grp-` and a `ses-` label. Any other first create is answered 400 and goes no further. A second create is answered 409.
+  spawner registers the create fields `incident-payload create` would print for that Run's Notification. The
+  Forwarder admits a single-issue create only when `fields.summary` and the parsed ADF `fields.description` equal
+  those fields, and the set of `fields.labels` equals the registered set. Other fields pass through. Nothing firing
+  means no create is registered. Bulk and Service Management creates are always refused. Any refused first create
+  is answered 400, names the differing field or forbidden endpoint, and spends the attempt without going upstream.
+  Every later create is answered 409.
   The log shows either as a WARNING `refused a POST …` from the Forwarder and a
   `[DENIED] Jira create refused by the Forwarder: …` line. The Run then begins its final message `failed: <why>`, which
   the log shows as `[FAILED] run reported failed: <why>` and the Receiver as `run … FAILED: …`, though Claude Code
-  calls the Run a success. A refused first create leaves no Incident behind (ADR 0002's 2026-10-01 amendment).
+  calls the Run a success. A successful Finish starts `ok: ` before any group text; a failed Finish starts
+  `failed: `. The formatter reads only the first non-empty line of a `success` result, case-sensitively, so
+  `ok: failed DEMO-12 created` succeeds and `FAILED: …` is not a failure marker. A refused first create leaves no Incident behind (ADR 0002's 2026-10-01 amendment).
 - **A close is checked.** After the transition to the done status, the Run reads `status` and `resolution` of the
   Incident, and ends `failed:` if it is done with no resolution. Until the Jira admin puts Resolution on the Resolve
   screen (`docs/admin-requests.md#jira-admin-resolution-screen`), each close also shows a WARNING

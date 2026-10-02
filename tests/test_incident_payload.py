@@ -980,10 +980,10 @@ def test_the_printed_create_is_the_payload_jira_as_would_send(tmp_path, project,
     ids=["firing", "related", "hostile"],
 )
 def test_the_printed_create_carries_the_content_the_forwarder_asks_of_a_first_create(
-    tmp_path, notification
+    tmp_path, notification, monkeypatch
 ):
-    """The Forwarder forwards a Run's one create only if its body holds an ADF bullet list and a
-    group and a session label (ADR 0002, 2026-10-01). The body is what jira-as's dry run prints
+    """The Forwarder forwards a Run's one create only if its judged fields equal the registered
+    content (ADR 0002, 2026-10-01). The body is what jira-as's dry run prints
     as `fields`, so a tool that stopped printing a create the Forwarder admits fails here, on
     the tree that holds both. A tree without the Forwarder's check has nothing to compare."""
     forwarder = importlib.import_module("grafana_jsm_sandbox.forwarder")
@@ -996,4 +996,23 @@ def test_the_printed_create_carries_the_content_the_forwarder_asks_of_a_first_cr
 
     fields = dry_run(dry, home)
 
-    assert missing(json.dumps({"fields": fields}).encode()) is None
+    expected = incident_payload.create_fields(
+        incident_payload.group_from_notification(notification),
+        incident_payload.read_facts(tmp_path / "runs" / RENDERED_SKILL / FACTS_FILE),
+    )
+    body = json.dumps({"fields": fields}).encode()
+    assert missing(body, expected) is None
+    monkeypatch.setattr(forwarder, "ThreadingHTTPServer", lambda *args: None)
+    gate = forwarder.Forwarder(forwarder.JiraCredential("https://example.invalid", "run", "token"))
+    sent = []
+    monkeypatch.setattr(gate, "_send_upstream", lambda *args: (sent.append(args) or (201, {}, b"{}")))
+    gate.set_sentinel("sentinel", expected)
+    from email.message import Message
+
+    from tests.conftest import basic_auth_header
+    headers = Message()
+    headers["Authorization"] = basic_auth_header("run", "sentinel")
+    assert gate.handle("POST", "/rest/api/3/issue", headers, body)[0] == 201
+    assert sent[0][3] == body
+    assert gate.handle("POST", "/rest/api/3/issue", headers, body)[0] == 409
+    assert len(sent) == 1

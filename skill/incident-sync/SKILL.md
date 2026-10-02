@@ -273,6 +273,8 @@ Read them every time. An id that was right last week is not a fact about this is
 
 ## Finish
 
+A successful Run ends with a first line starting exactly `ok: `, before any group
+text (for example, `ok: failed DEMO-12 created` for a group named `failed`).
 End with one line for the Incident, naming the group, the Incident key and what
 changed — `created`, `updated` with how many labels were added, `updated and
 moved to {{STATUS_IN_PROGRESS}}`, `completed`, or `skipped` and why — and then one line
@@ -283,12 +285,12 @@ create every firing Alert is `new` and every other one `resolved`.
 A Run that failed ends differently. Its final message begins `failed: <why>`: those
 characters first, with nothing before them, then jira-as's or `incident-payload`'s
 error as the why. The Receiver and the log read that first line, and only that
-line, to mark the Run failed; a Run that ends any other way is counted a success,
-whatever the Incident holds.
+line, to mark the Run failed. These prefixes are case-sensitive: `FAILED: ` is
+not a failure marker. Always use the appropriate prefix, including for a skip.
 
 A Run ends as `failed` with the error when `incident-payload` refuses, when the dry
 run or the create fails (the Forwarder's refusal of a create included), or when a
 close leaves the Incident done without a resolution. A Run whose create failed ends
 as `failed` with jira-as's error, and names no Incident key because there is none;
-after a close that left no resolution, the Incident's own Finish line follows the
-`failed:` line. Nothing else after those lines.
+after a close that left no resolution, the Incident's group, key and action follow the
+`failed: ` line. Nothing else after those lines.

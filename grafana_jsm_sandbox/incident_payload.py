@@ -276,6 +276,11 @@ def read_group(path: Path) -> Group:
         ) from None
     except (OSError, UnicodeDecodeError, ValueError) as failure:
         raise PayloadError(f"{NOTIFICATION_FILENAME} cannot be read as JSON: {failure}") from None
+    return group_from_notification(notification)
+
+
+def group_from_notification(notification: object) -> Group:
+    """The payload facts of a Notification, without reading a file."""
     if not isinstance(notification, dict):
         raise PayloadError(f"{NOTIFICATION_FILENAME} is not a JSON object")
     raw_alerts = notification.get("alerts")
@@ -447,24 +452,34 @@ def compact(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def create(group: Group, facts: Facts, component: str | None) -> list[str]:
+def create_fields(group: Group, facts: Facts) -> dict:
+    """The create fields shared by the printed command and the Forwarder gate."""
     firing = group.firing
     if not firing:
         raise PayloadError(
             "no Alert in the Notification is firing: a resolved Notification with no Match is "
             "skipped, never created"
         )
+    return {
+        "summary": summary(group),
+        "labels": [group.label, facts.session_label, *group.fingerprint_labels],
+        "description": description(group),
+    }
+
+
+def create(group: Group, facts: Facts, component: str | None) -> list[str]:
+    content = create_fields(group, facts)
+    firing = group.firing
     if component is not None and (not group.service or component != group.service):
         raise PayloadError(
             f"--component {component!r} is not the service label every firing Alert carries "
             f"({group.service or 'they carry none in common'}): leave --component off"
         )
-    labels = [group.label, facts.session_label, *group.fingerprint_labels]
     words = [
         f"jira-as issue create -p {facts.project} -t {ISSUE_TYPE}",
-        f"-s {quoted(summary(group))}",
-        f"--labels {quoted(','.join(labels))}",
-        f"--description {quoted(compact(description(group)))}",
+        f"-s {quoted(content['summary'])}",
+        f"--labels {quoted(','.join(content['labels']))}",
+        f"--description {quoted(compact(content['description']))}",
     ]
     fields = custom_fields(group, facts)
     if fields:

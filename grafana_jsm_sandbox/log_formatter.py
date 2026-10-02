@@ -76,7 +76,7 @@ _LABEL_WIDTH = max(len(label) for label in _LABELS)
 
 REDACTED = "<redacted>"
 
-REPORTED_FAILURE = "failed:"
+REPORTED_FAILURE = "failed: "
 """How the Skill has a Run begin its final message when it failed. The Skill's Finish names the
 same word; `test_skill_template` pins it there and `test_log_formatter` here."""
 
@@ -397,13 +397,15 @@ def _reported_failure(event: dict) -> str | None:
     Only the first non-empty line counts, so a Run that mentions a failure further down, as a
     Finish naming a recovered step might, is not one that failed.
     """
+    if event.get("subtype") != "success":
+        return None
     result = event.get("result")
     if not isinstance(result, str):
         return None
     for line in result.splitlines():
-        text = line.strip()
-        if text:
-            if text[: len(REPORTED_FAILURE)].lower() != REPORTED_FAILURE:
+        text = line
+        if text.strip():
+            if not text.startswith(REPORTED_FAILURE):
                 return None
             return text[len(REPORTED_FAILURE) :].strip() or "no reason given"
     return None

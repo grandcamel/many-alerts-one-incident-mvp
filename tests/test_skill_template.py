@@ -661,7 +661,8 @@ def test_a_failed_run_ends_on_a_first_line_the_log_and_the_receiver_can_read():
     assert "Its final message begins `failed: <why>`" in finish
     assert "those characters first, with nothing before them" in finish
     assert "read that first line, and only that line, to mark the Run failed" in finish
-    assert "a Run that ends any other way is counted a success" in finish
+    assert "first line starting exactly `ok: `, before any group text" in finish
+    assert "These prefixes are case-sensitive" in finish
     assert (
         "To finish `failed` is to end with a final message whose first line is `failed: <why>`"
         in (" ".join(skill.split()))

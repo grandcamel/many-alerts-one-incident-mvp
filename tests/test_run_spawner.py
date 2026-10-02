@@ -649,3 +649,70 @@ def test_a_transcript_that_fills_its_tmpfs_costs_the_rest_of_the_copy_and_not_th
     assert "[result] success in 1.2s" in caplog.text
     assert f"the transcript {run.transcript_path} stopped being written" in caplog.text
     assert caplog.text.count("stopped being written") == 1
+
+
+@pytest.mark.parametrize("resolved", [False, True])
+def test_spawner_registers_the_helpers_content_before_execution_and_clears_it(
+    tmp_path, monkeypatch, resolved
+):
+    from grafana_jsm_sandbox.forwarder import Forwarder, JiraCredential
+    from grafana_jsm_sandbox.incident_payload import FACTS_FILE, Facts, create_fields, read_group
+    from grafana_jsm_sandbox.receiver import RunOutcome
+    from grafana_jsm_sandbox.run_command import RENDERED_SKILL
+
+    monkeypatch.setattr("grafana_jsm_sandbox.forwarder.ThreadingHTTPServer", lambda *args: None)
+    forwarder = Forwarder(JiraCredential("https://example.invalid", REAL_EMAIL, REAL_TOKEN))
+    run = a_run(tmp_path / "runs")
+    notification = json.loads((FIXTURES / "mvp/notification-group-firing.json").read_text())
+    if resolved:
+        for alert in notification["alerts"]:
+            alert["status"] = "resolved"
+    run.notification_path.write_text(json.dumps(notification))
+    facts = Facts(PROJECT_KEY, "ses-demo", None, None, None, "Completed")
+    rendered = run.working_directory.parent / RENDERED_SKILL
+    rendered.mkdir()
+    (rendered / FACTS_FILE).write_text(facts.as_json())
+    spawner = spawner_for([], forwarder)
+
+    def execute(self, run, sentinel):
+        assert forwarder._sentinel == sentinel
+        assert forwarder._create_fields == (
+            None if resolved else create_fields(read_group(run.notification_path), facts)
+        )
+        if resolved:
+            from email.message import Message
+
+            from tests.conftest import basic_auth_header
+            headers = Message()
+            headers["Authorization"] = basic_auth_header(REAL_EMAIL, sentinel)
+            assert forwarder.handle("POST", "/rest/api/3/issue", headers, b'{"fields": {}}')[0] == 400
+        return RunOutcome(0)
+
+    monkeypatch.setattr(RunSpawner, "_execute", execute)
+
+    assert spawner(run) == RunOutcome(0)
+    assert forwarder._sentinel is None
+    assert forwarder._create_fields is None
+
+
+@pytest.mark.parametrize("finish, failure", [
+    ("ok: failed DEMO-12 created", None),
+    ("failed: Jira refused the create", "run reported failed: Jira refused the create"),
+    ("FAILED: Jira refused the create", None),
+])
+def test_finish_prefix_reaches_the_receiver_outcome_without_sockets(tmp_path, finish, failure):
+    from unittest.mock import Mock
+
+    forwarder = Mock(url="http://127.0.0.1:1")
+    run = a_run(tmp_path / "runs")
+    notification = json.loads((FIXTURES / "mvp/notification-group-firing.json").read_text())
+    notification["groupLabels"]["incident_group"] = "failed"
+    run.notification_path.write_text(json.dumps(notification))
+    event = {"type": "result", "subtype": "success", "result": finish}
+    code = f"import json; print(json.dumps({event!r}))"
+
+    outcome = spawner_for(_program(code), forwarder)(run)
+
+    assert outcome.exit_status == 0
+    assert outcome.failure == failure
+    forwarder.clear_sentinel.assert_called_once()

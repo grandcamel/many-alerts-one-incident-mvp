@@ -141,6 +141,13 @@ By layer or stage, where the line alone may not say enough:
 
 ## A failed Run
 
+The Skill's Finish starts `ok: ` for success or `failed: ` for failure, before any group text.
+The formatter matches exactly `failed: ` on the first non-empty line of a `success` result,
+case-sensitively. A group named `failed` can finish `ok: failed DEMO-12 created` successfully;
+`FAILED: ` is not a failure marker. A refused first create prints `[DENIED]` and spends the
+attempt; bulk and Service Management creates are refused too. Single-issue creates must match
+the helper's registered Summary, label set and ADF Description for this Notification.
+
 A Run that failed leaves a `[FAILED]` line in the log, usually followed by a `[hint]` line naming
 the cause, and the Receiver logs `run <id> FAILED: <reason>`:
 

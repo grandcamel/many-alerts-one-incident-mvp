@@ -424,7 +424,10 @@ instead of `[result]`: any result with `is_error: true` or an `error_` subtype. 
 refused outright reports `subtype: success` and exits 0, so neither of those is trusted. A Run
 that could not do its job, because the Forwarder refused its create or a close left no
 resolution, ends its message `failed: <why>` (the Skill's Finish) and is `success` too; that line
-renders as `[FAILED] run reported failed: <why>`, and a create the Forwarder refused prints a
+renders as `[FAILED] run reported failed: <why>`. The first non-empty line of a `success` result
+must start exactly `failed: ` for this marker to apply. A successful Finish starts `ok: ` before
+the group text (`ok: failed DEMO-12 created` succeeds); `FAILED: ` is not a failure marker.
+A create the Forwarder refused prints a
 `[DENIED]` line before it. When the cause is one a newcomer's setup is known to hit (a Claude token that is invalid or expired,
 usage credits run out, a rate limit, a model the seat cannot use, a spent budget) a `[hint]`
 line under it says what to do. Claude Code retrying the API prints `[retry]`, and a rate-limit
@@ -546,6 +549,15 @@ or 5xx is a WARNING, and a 401, a 403 or a 404 carries what it most likely means
 the credential in `.env` refused, the site's IP allowlist (when the 403's body says so, gzip or
 deflate undone first), a missing permission, or a project key the account cannot see. A 403 whose
 body cannot be read names both of its likely causes. The body itself is never logged.
+
+Each Run gets one create attempt. Before starting it, the spawner registers the create content
+`incident-payload create` would print for its Notification and project facts. The Forwarder
+admits only single-issue creates whose Summary and parsed ADF Description equal that content
+and whose label set equals the registered set. Other fields pass through. Without firing
+Alerts, no create is registered. Bulk and Service Management creates are always refused.
+A refused first create gets a Jira-shaped 400 naming the field or endpoint and spends the
+attempt without going upstream; every later create gets 409. Sentinel registration, validation
+and spending use the same lock; clearing the sentinel clears the content and attempt too.
 
 Run it on its own to point a jira-as on this machine at the real site through a sentinel:
 

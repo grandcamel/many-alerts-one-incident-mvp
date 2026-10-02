@@ -32,6 +32,13 @@ from pathlib import Path
 from typing import IO, Self, cast
 
 from grafana_jsm_sandbox.forwarder import ENVIRONMENT_VARIABLES, Forwarder
+from grafana_jsm_sandbox.incident_payload import (
+    FACTS_FILE,
+    PayloadError,
+    create_fields,
+    read_facts,
+    read_group,
+)
 from grafana_jsm_sandbox.log_formatter import (
     DENIED,
     FAILED,
@@ -43,6 +50,7 @@ from grafana_jsm_sandbox.log_formatter import (
     run_failure,
 )
 from grafana_jsm_sandbox.receiver import Run, RunOutcome
+from grafana_jsm_sandbox.run_command import RENDERED_SKILL
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +216,14 @@ class RunSpawner:
     def __call__(self, run: Run) -> RunOutcome:
         """Run one Run to completion and say how it ended."""
         sentinel = secrets.token_urlsafe(SENTINEL_BYTES)
-        self.forwarder.set_sentinel(sentinel)
+        try:
+            group = read_group(run.notification_path)
+            facts = read_facts(run.working_directory.parent / RENDERED_SKILL / FACTS_FILE)
+            expected = create_fields(group, facts) if group.firing else None
+        except PayloadError as failure:
+            logger.warning("run %s has no create content: %s", run.run_id, failure)
+            expected = None
+        self.forwarder.set_sentinel(sentinel, expected)
         try:
             return self._execute(run, sentinel)
         finally:
