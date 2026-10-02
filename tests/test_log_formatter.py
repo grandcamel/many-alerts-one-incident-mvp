@@ -16,6 +16,12 @@ from dataclasses import dataclass
 
 import pytest
 
+from grafana_jsm_sandbox.forwarder import (
+    CREATE_INCOMPLETE,
+    CREATE_REFUSAL,
+    CREATE_REFUSED_BODY,
+    incomplete_create_body,
+)
 from grafana_jsm_sandbox.log_formatter import (
     DIAGNOSTIC,
     FAILED,
@@ -25,6 +31,7 @@ from grafana_jsm_sandbox.log_formatter import (
     HINT_MODEL,
     HINT_RATE_LIMIT,
     HINT_TOKEN,
+    REPORTED_FAILURE,
     RESULT,
     RUN,
     format_event,
@@ -86,6 +93,31 @@ def result_event(**fields) -> dict:
         "total_cost_usd": 0.1,
         **fields,
     }
+
+
+REFUSAL_MESSAGE = json.loads(CREATE_REFUSED_BODY)["errorMessages"][0]
+
+JIRA_AS_ON_THE_REFUSED_CREATE = f"""Exit code 1
+[ERROR] Jira Error: Failed to create issue: {REFUSAL_MESSAGE}
+
+This usually means the resource was modified by another user.
+Try refreshing and applying your changes again.
+  Details: [create issue] (HTTP 409) Failed to create issue: {REFUSAL_MESSAGE}
+
+Response data: {{'errorMessages': ['{REFUSAL_MESSAGE}'], 'errors': {{}}}}"""
+"""What a Run's Bash tool hands back when jira-as meets the Forwarder's 409, as jira-as 2.0.0
+prints a ConflictError."""
+
+LACKED = "its description is not a document with a bullet list"
+INCOMPLETE_MESSAGE = json.loads(incomplete_create_body(LACKED))["errorMessages"][0]
+
+JIRA_AS_ON_THE_INCOMPLETE_CREATE = f"""Exit code 1
+[ERROR] Validation Error: {INCOMPLETE_MESSAGE}
+  Details: [create issue] (HTTP 400) {INCOMPLETE_MESSAGE}
+
+Response data: {{'errorMessages': ['{INCOMPLETE_MESSAGE}'], 'errors': {{}}}}"""
+"""What a Run's Bash tool hands back when jira-as meets the Forwarder's 400 for a first create
+that did not carry an Incident's content."""
 
 
 @dataclass
@@ -174,6 +206,29 @@ CASES = [
         id="failing-tool-result-is-marked-as-error",
         event=tool_result_event("jira-as: no Incident matched", is_error=True),
         expected=["[err]    jira-as: no Incident matched"],
+    ),
+    Case(
+        # jira-as wraps the Forwarder's 409 in "Jira Error", a hint to refresh and apply the
+        # change again, and a copy of the response, which reads as a crash and says the
+        # opposite of what the Forwarder means. The Transcript keeps all of it.
+        id="a-second-create-the-forwarder-refused-reads-as-a-refusal-not-a-crash",
+        event=tool_result_event(JIRA_AS_ON_THE_REFUSED_CREATE, is_error=True),
+        expected=[
+            (
+                "[DENIED] Jira create refused by the Forwarder: this Run already made its one "
+                "create attempt"
+            )
+        ],
+    ),
+    Case(
+        id="a-first-create-without-an-incidents-content-reads-as-a-refusal-and-says-what-it-lacked",
+        event=tool_result_event(JIRA_AS_ON_THE_INCOMPLETE_CREATE, is_error=True),
+        expected=[f"[DENIED] Jira create refused by the Forwarder: {CREATE_INCOMPLETE} ({LACKED})"],
+    ),
+    Case(
+        id="the-refusal-words-in-a-result-that-did-not-fail-are-just-output",
+        event=tool_result_event(f"notes: {CREATE_REFUSAL}"),
+        expected=[f"[out]    notes: {CREATE_REFUSAL}"],
     ),
     Case(
         id="permission-denied-is-unmistakable",
@@ -650,6 +705,111 @@ def test_the_reason_the_spawner_reports_is_redacted_too():
 )
 def test_only_a_result_can_say_a_run_failed(event):
     assert run_failure(event) is None
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "its body is not JSON",
+        "its body has no fields object",
+        "its description is not a document with a bullet list",
+        "its labels have no group label starting grp-",
+        "its labels have no session label starting ses-",
+    ],
+)
+def test_every_reason_the_forwarder_gives_for_an_incomplete_create_reaches_the_log_whole(problem):
+    message = json.loads(incomplete_create_body(problem))["errorMessages"][0]
+    result = f"Exit code 1\n[ERROR] Validation Error: {message}\n  Details: (HTTP 400) {message}"
+
+    assert format_event(tool_result_event(result, is_error=True)) == [
+        f"[DENIED] Jira create refused by the Forwarder: {CREATE_INCOMPLETE} ({problem})"
+    ]
+
+
+# --- A Run that reports its own failure ---
+
+
+def test_a_run_that_reports_failed_reads_as_failed_though_claude_code_says_success():
+    """The Skill ends a Run that could not do its job with a message starting `failed:`. Claude
+    Code calls that Run `success` with `is_error` false and exit status 0, since it finished."""
+    event = result_event(
+        is_error=False,
+        terminal_reason="completed",
+        result="failed: the create was refused (HTTP 409)\nno Incident was made",
+    )
+
+    assert format_event(event) == [
+        "[FAILED] run reported failed: the create was refused (HTTP 409)"
+    ]
+    assert run_failure(event) == "run reported failed: the create was refused (HTTP 409)"
+
+
+def test_the_denied_create_is_followed_by_failed_not_by_a_success_line():
+    lines = [
+        *format_event(tool_result_event(JIRA_AS_ON_THE_REFUSED_CREATE, is_error=True)),
+        *format_event(result_event(result="failed: Jira refused a second create")),
+    ]
+
+    assert [line.split()[0] for line in lines] == ["[DENIED]", "[FAILED]"]
+    assert not [line for line in lines if line.startswith(RESULT)]
+
+
+@pytest.mark.parametrize(
+    ("result", "reason"),
+    [
+        pytest.param("failed: no resolution", "no resolution", id="plain"),
+        pytest.param("Failed: no resolution", "no resolution", id="capitalised"),
+        pytest.param("\n  failed:   padded  \nmore", "padded", id="blank-lines-and-padding"),
+        pytest.param("failed:", "no reason given", id="no-reason"),
+    ],
+)
+def test_the_run_reports_failed_by_beginning_its_first_line_with_it(result, reason):
+    event = result_event(result=result)
+
+    assert run_failure(event) == f"run reported failed: {reason}"
+    assert REPORTED_FAILURE == "failed:"
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param("checkout-outage: created OPS-12", id="a-finish-line"),
+        pytest.param("checkout-outage: created OPS-12\nfailed: one retry", id="a-later-line"),
+        pytest.param("The create failed: but the retry made OPS-12", id="mid-sentence"),
+        pytest.param("", id="empty"),
+        pytest.param(None, id="no-text"),
+        pytest.param(["failed: x"], id="not-text"),
+    ],
+)
+def test_a_result_that_does_not_begin_with_failed_is_a_success(result):
+    event = result_event(result=result)
+
+    assert run_failure(event) is None
+    assert format_event(event)[-1].startswith(RESULT)
+
+
+def test_a_reported_failure_gets_no_hint_about_the_claude_account():
+    """Its words are about Jira and the Incident, even when they say `rate limit` or `token`."""
+    event = result_event(result="failed: Jira answered a rate limit and the create has no key")
+
+    assert format_event(event) == [
+        "[FAILED] run reported failed: Jira answered a rate limit and the create has no key"
+    ]
+
+
+def test_an_api_failure_still_names_its_own_reason_over_a_failed_line():
+    event = result_event(is_error=True, terminal_reason="api_error", result="failed: and more")
+
+    assert run_failure(event) == "api_error: failed: and more"
+
+
+def test_the_reason_a_run_reports_is_redacted_too():
+    event = result_event(result="failed: Invalid API key sk-ant-api03-abcdefghijklmnop")
+
+    failure = run_failure(event)
+
+    assert failure is not None
+    assert "abcdefghijklmnop" not in failure
 
 
 def test_an_api_retry_says_which_attempt_why_and_how_long_it_waits():

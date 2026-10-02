@@ -420,8 +420,11 @@ token-shaped can reach a screen.
 
 A Run that failed ends on `[FAILED] <terminal_reason or subtype>: <first line of what it said>`
 instead of `[result]`: any result with `is_error: true` or an `error_` subtype. A Run the API
-refused outright reports `subtype: success` and exits 0, so neither of those is trusted. When
-the cause is one a newcomer's setup is known to hit (a Claude token that is invalid or expired,
+refused outright reports `subtype: success` and exits 0, so neither of those is trusted. A Run
+that could not do its job, because the Forwarder refused its create or a close left no
+resolution, ends its message `failed: <why>` (the Skill's Finish) and is `success` too; that line
+renders as `[FAILED] run reported failed: <why>`, and a create the Forwarder refused prints a
+`[DENIED]` line before it. When the cause is one a newcomer's setup is known to hit (a Claude token that is invalid or expired,
 usage credits run out, a rate limit, a model the seat cannot use, a spent budget) a `[hint]`
 line under it says what to do. Claude Code retrying the API prints `[retry]`, and a rate-limit
 event prints `[limit]` only when its status is not `allowed`.

@@ -10,6 +10,12 @@ reason, plus a `[hint]` line when the cause is one a newcomer's setup is known t
 hit. `run_failure` is the same judgement for the spawner, so the Receiver's
 closing line about a Run and the Transcript's own last line always agree.
 
+A failure is also one the Run reports itself. The Skill has a Run that could not do
+its job, a create the Forwarder refused or an Incident that ended without a resolution,
+begin its final message with `failed:`. Claude Code ends that Run `success`, with exit
+status 0, because the Run did finish, so the line is read here: it is the only way the log
+and the Receiver learn that the Incident is not what the audience was shown.
+
 Every line goes through `redact` on the way out. A Run only ever holds a
 sentinel, never the real Jira token (ADR 0002), but the log window is on a screen
 in front of an audience, so anything credential-shaped is replaced before it can
@@ -30,6 +36,8 @@ import re
 import sys
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
+
+from grafana_jsm_sandbox.forwarder import CREATE_INCOMPLETE, CREATE_REFUSAL
 
 TRIM_LINES = 5
 """How many lines of one tool result reach the log."""
@@ -67,6 +75,14 @@ _LABELS = (
 _LABEL_WIDTH = max(len(label) for label in _LABELS)
 
 REDACTED = "<redacted>"
+
+REPORTED_FAILURE = "failed:"
+"""How the Skill has a Run begin its final message when it failed. The Skill's Finish names the
+same word; `test_skill_template` pins it there and `test_log_formatter` here."""
+
+REPORTED_FAILURE_REASON = "run reported failed"
+"""What the `[FAILED]` line names as the reason, in the place an API failure puts its
+terminal reason."""
 
 _CREDENTIAL_WORD = r"token|password|passwd|secret|api[_-]?key|credential"
 _QUOTE = r"['\"]?"
@@ -243,12 +259,27 @@ def _render_user(event: dict) -> list[str]:
             # recaps every denial at the end, so printing the paragraph a third
             # time only buries the line the audience is meant to notice.
             continue
+        content = _as_text(block.get("content"))
+        refusal = _create_refusal(content) if block.get("is_error") else None
+        if refusal is not None:
+            # The Forwarder refused a create on purpose, a second one or a first that did not
+            # carry an Incident's content. jira-as wraps that in "Jira Error" and, for a 409, a
+            # hint to refresh and apply the change again, which reads as a crash and says the
+            # opposite, so the log says what happened. The Transcript keeps what jira-as printed.
+            lines.append(_line(DENIED, f"Jira create refused by the Forwarder: {refusal}"))
+            continue
         label = ERROR if block.get("is_error") else OUTPUT
-        lines.extend(
-            _line(label, _truncated(text))
-            for text in _trimmed_lines(_as_text(block.get("content")))
-        )
+        lines.extend(_line(label, _truncated(text)) for text in _trimmed_lines(content))
     return lines
+
+
+def _create_refusal(content: str) -> str | None:
+    """The Forwarder's own words for a create it refused, found in what jira-as printed."""
+    if CREATE_REFUSAL in content:
+        return CREATE_REFUSAL
+    # The 400 names what the create lacked in the brackets after the words.
+    match = re.search(rf"{re.escape(CREATE_INCOMPLETE)}(?: \([^)\n]*\))?", content)
+    return match.group(0) if match else None
 
 
 def _render_result(event: dict) -> list[str]:
@@ -270,7 +301,9 @@ def _render_result(event: dict) -> list[str]:
     failure = _failure(event)
     if failure is not None:
         lines.append(_line(FAILED, _truncated(failure)))
-        hint = _hint(event)
+        # A failure the Run reports is about Jira and the Incident, whatever its words: a
+        # "rate limit" in it is not the Claude account's, so no hint for the account.
+        hint = _hint(event) if _api_failed(event) else None
         if hint is not None:
             lines.append(_line(HINT, hint))
         return lines
@@ -328,7 +361,8 @@ def run_failure(event: object) -> str | None:
     `is_error` is true or its subtype starts `error_`; the subtype alone is not
     enough, because a Run the API refused outright (out of usage credits, in the
     owner's case) ends `subtype: success` with `is_error: true` and
-    `terminal_reason: api_error`, and the process still exits 0.
+    `terminal_reason: api_error`, and the process still exits 0. It is also a failure
+    when the Run's own final message begins `failed:`, which ends `success` as well.
     """
     if not isinstance(event, dict) or event.get("type") != "result":
         return None
@@ -336,16 +370,43 @@ def run_failure(event: object) -> str | None:
     return None if failure is None else redact(_truncated(failure))
 
 
-def _failure(event: dict) -> str | None:
-    """`<terminal_reason or subtype>: <first line of the result text>`, for a failed result."""
+def _api_failed(event: dict) -> bool:
+    """Whether Claude Code itself says the Run failed, by `is_error` or an `error_*` subtype."""
     subtype = event.get("subtype")
-    failed = event.get("is_error") is True or (
+    return event.get("is_error") is True or (
         isinstance(subtype, str) and subtype.startswith("error_")
     )
-    if not failed:
-        return None
-    reason = event.get("terminal_reason") or subtype or "unknown"
+
+
+def _failure(event: dict) -> str | None:
+    """`<terminal_reason or subtype>: <first line of the result text>`, for a failed result.
+
+    A Run that reports its own failure has no terminal reason, so its line reads
+    `run reported failed: <what it said after "failed:">`.
+    """
+    if not _api_failed(event):
+        reported = _reported_failure(event)
+        return None if reported is None else f"{REPORTED_FAILURE_REASON}: {reported}"
+    reason = event.get("terminal_reason") or event.get("subtype") or "unknown"
     return f"{reason}: {_failure_text(event)}"
+
+
+def _reported_failure(event: dict) -> str | None:
+    """What the Run said after `failed:`, when its result text begins with it; else None.
+
+    Only the first non-empty line counts, so a Run that mentions a failure further down, as a
+    Finish naming a recovered step might, is not one that failed.
+    """
+    result = event.get("result")
+    if not isinstance(result, str):
+        return None
+    for line in result.splitlines():
+        text = line.strip()
+        if text:
+            if text[: len(REPORTED_FAILURE)].lower() != REPORTED_FAILURE:
+                return None
+            return text[len(REPORTED_FAILURE) :].strip() or "no reason given"
+    return None
 
 
 def _failure_text(event: dict) -> str:
