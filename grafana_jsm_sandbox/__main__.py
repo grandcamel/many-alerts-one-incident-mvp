@@ -168,6 +168,8 @@ class Settings:
             failures.append(str(failure))
         port = _number(environment, PORT_VARIABLE, DEFAULT_PORT, int, failures)
         run_timeout = _number(environment, RUN_TIMEOUT_VARIABLE, RUN_TIMEOUT, float, failures)
+        if not math.isfinite(run_timeout) or run_timeout <= 0:
+            failures.append(f"{RUN_TIMEOUT_VARIABLE} must be finite and greater than zero")
         run_settle_seconds = _number(
             environment, RUN_SETTLE_VARIABLE, DEFAULT_RUN_SETTLE_SECONDS, float, failures
         )

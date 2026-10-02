@@ -217,6 +217,13 @@ def test_startup_stops_on_a_timeout_that_is_not_a_number(capsys):
     assert "RUN_TIMEOUT" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("value", ["0", "-5", "nan", "inf", "-inf"])
+def test_startup_stops_on_a_timeout_that_is_not_finite_and_positive(value, capsys):
+    assert main([], environment=complete_but(RUN_TIMEOUT=value)) == 1
+
+    assert "RUN_TIMEOUT must be finite and greater than zero" in capsys.readouterr().err
+
+
 def test_startup_says_nothing_of_the_credential_it_could_not_read(capsys):
     """A container that fails to start still prints its log where an audience can see it."""
     main([], environment=complete_but(JIRA_EMAIL=None))
