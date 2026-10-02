@@ -31,3 +31,9 @@ operator step, repeated after `lgtm` is recreated. These queries authenticate wi
 token; Grafana in this stack still permits anonymous Admin. Presenter links open in the
 presenter's browser under its identity, not the Run's token. This slice adds no token broker,
 anonymous-auth change, backend binding change or Grafana mediation.
+
+**2026-10-02, what the Viewer token does and does not show (rehearsal).** A valid token runs the queries
+as the `demo-viewer` service account. With anonymous Admin on, Grafana answers a wrong or missing token as
+the anonymous user, so the queries still succeed and `grafana-query` never reports `token rejected` here; a
+successful query does not show that the token was accepted. The token is the Run's Grafana identity when
+it is valid, not a limit on what the Run can read.

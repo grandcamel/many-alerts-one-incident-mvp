@@ -51,7 +51,10 @@ not part of the four-Alert `verify --mvp --live` take.
 
 ## Inject, inspect, recover
 
-Recreate traffic only, keeping the instrumented application running:
+Before injecting, follow the MVP runbook's [per-take steps](mvp-runbook.md#5-before-every-take): a new
+`DEMO_SESSION_ID` for this take, loaded by recreating `demo` with the same files,
+`docker compose -f docker-compose.yml -f docker-compose.slow-response.yml up -d demo`. Then recreate
+traffic only, keeping the instrumented application running:
 
 ```bash
 ROLLDICE_SIDES=6 ROLLDICE_SLOW_MS=500 docker compose -f docker-compose.yml -f docker-compose.slow-response.yml up -d --no-deps --force-recreate traffic

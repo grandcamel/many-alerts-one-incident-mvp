@@ -22,7 +22,7 @@ service closes it. The design is in `docs/mvp-spec.md`.
 | Variable | Meaning |
 |---|---|
 | `$JIRA_SITE_URL` | The Jira site, as `https://<site>.atlassian.net` |
-| `$PROJECT_KEY` | A JSM project with an `Incident` issue type |
+| `$DEMO_PROJECT_KEY` | A JSM project with an `Incident` issue type |
 | `$JIRA_EMAIL` / `$JIRA_API_TOKEN` | An account that can create, edit, comment on and transition issues in that project |
 | `$ANTHROPIC_API_KEY` | An Anthropic API key (or set `CLAUDE_CODE_OAUTH_TOKEN` instead; exactly one) |
 | `$DEMO_SESSION_ID` | `[a-z0-9-]{1,32}`, starting with a letter, with no hyphen before a digit (jira-as would read `reh-1` as an issue key). Use a new value for every take, rehearsals and the demo itself (`opus1`, `sonnet1`, `haiku1`, …; section 5) |
@@ -52,11 +52,10 @@ If you commit from the machine that runs the demo, set a repo-local git identity
 
 ```bash
 cp .env.example .env
+chmod 600 .env
 ```
 
-Fill in `JIRA_SITE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `DEMO_PROJECT_KEY`, `ANTHROPIC_API_KEY` and
-`DEMO_SESSION_ID`. Leave `CLAUDE_CODE_OAUTH_TOKEN` empty: use exactly one model credential. **Never paste a token into
-chat.** Claude never reads `.env`; the repo's settings deny it.
+Fill in `JIRA_SITE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `DEMO_PROJECT_KEY` and `DEMO_SESSION_ID`, and exactly one model credential: uncomment and fill `ANTHROPIC_API_KEY` (the usual one) or `CLAUDE_CODE_OAUTH_TOKEN`, and leave the other empty and commented. **Never paste a token into chat.** Claude never reads `.env`; the repo's settings deny it.
 
 ### Optional Grafana investigation
 
@@ -121,16 +120,22 @@ as a flag:
 | `grafana-query instant --query=EXPR` | `--datasource=UID` defaults to `prometheus`; `--time=TIME` defaults to `now`. |
 | `grafana-query range --query=EXPR` | `--datasource=UID` defaults to `prometheus`; `--start=TIME` to `now-10m`, `--end=TIME` to `now`, `--step=DURATION` to `10s`. |
 | `grafana-query get --path=PATH` | `--datasource=UID` defaults to `prometheus`; repeat `--param=NAME=VALUE` for discovery parameters. Paths include `/api/v1/labels`, `/api/v1/series` and `/api/v1/metadata`. |
+| `grafana-query logs --query=EXPR` | `--datasource=UID` defaults to `loki`; `--start=TIME` to `now-10m`, `--end=TIME` to `now`, `--limit=N` to `100`, `--direction=` `backward` (the default) or `forward`. |
+| `grafana-query traces --query=EXPR` | `--datasource=UID` defaults to `tempo`; `--start=TIME` to `now-10m`, `--end=TIME` to `now`, `--limit=N` to `20`. |
+| `grafana-query trace --id=ID` | `--datasource=UID` defaults to `tempo`. |
 
 There are no URL, token, output-path or timeout flags. Direct invocation validates the Grafana
 URLs and token even when the enable flag is false; that flag controls Receiver wiring.
-Arbitrary PromQL and discovery GETs are allowed. The per-request elapsed timeout is ten seconds;
+Arbitrary PromQL, LogQL, TraceQL, trace-ID lookups and discovery GETs are allowed; `logs` and
+`traces` ask for at most `--limit` results, and a result at that limit is marked possibly incomplete. The per-request elapsed timeout is ten seconds;
 the existing Run timeout still applies. There is no query menu, attempt budget, retry policy,
 response-size limit, sample cap or observation-window cap. The first five output lines form the
 compact Transcript summary; line six and the appended `grafana-evidence.jsonl` in that Run's
 directory retain the complete JSON evidence. `incident-payload investigate --key KEY --observation
 TEXT --interpretation TEXT --unknown TEXT` builds the single evidence comment mechanically from
 that file, with the exact `[grafana-investigation] ` prefix and the Run's three judgments.
+It writes the comment as an ADF file in the Run's directory and prints one line,
+`jira-as collaborate comment add KEY --body-file <file> --format adf`, which the Run runs as printed.
 Investigation comments do not count as lifecycle Runs in the closing comment or verifier.
 
 **Presenter and fallback:** say, “These queries authenticate with a Viewer token,” and only after
@@ -195,9 +200,10 @@ completed Incident must leave it, so the queue's JQL must filter on `resolution 
 
 - `configure` first looks for a queue named `Incidents` and takes it when exactly one has that name. It warns when
   that queue's JQL does not filter on the resolution.
-- When no queue has that name, or several do, `configure` takes the one queue whose JQL is exactly the project,
+- When no queue has that name, `configure` takes the one queue whose JQL is exactly the project,
   `issuetype = Incident` and `resolution = Unresolved`, with no other condition, and only when exactly one queue
-  qualifies. It prints the queue's name, so you can see what it chose.
+  qualifies. When several queues have that name, it applies that test to those queues only. It prints the queue
+  name, so you can see what it chose.
 - When it cannot choose, it leaves `DEMO_QUEUE_URL` as it is, prints a `queue` WARN that says why, and lists each
   candidate as `candidate "<name>" (id <n>): <address>; JQL: …`. `doctor`'s `queue url` line then says to set the
   address by hand, and does not suggest `configure --write`, which would write nothing.
@@ -208,15 +214,19 @@ completed Incident must leave it, so the queue's JQL must filter on `resolution 
   again: it checks that the address is on the demo's site, names this project's key and is a queue of the project's
   service desk (a FAIL when not), and warns when its JQL lets a resolved Incident stay in it.
 
-If Claude Code's **auto mode** refuses the helpers as "production reads", run the session in default mode, or add
-allow rules for `configure`, `doctor`, `verify` and `reset` to the git-ignored `.claude/settings.local.json`.
+If Claude Code's **auto mode** refuses the helpers as "production reads", run the session in default mode and
+approve each blocked command, or add allow rules for the read-only ones to the git-ignored
+`.claude/settings.local.json`: `Bash(python3 -m grafana_jsm_sandbox.doctor *)`,
+`Bash(python3 -m grafana_jsm_sandbox.configure *)` and
+`Bash(python3 -m grafana_jsm_sandbox.reset --dry-run)`. Leave `verify` and the real `reset` without allow rules,
+so each Jira write still stops at a permission prompt.
 
 ## 4. Prove it: `verify --mvp` (paid; keep to your budget)
 
 1. `verify --mvp --replay` replays grouped alerts through the real Run and Jira. It expects:
    - one Incident with `grp-checkout-outage` and `ses-$DEMO_SESSION_ID`, carrying at least two `fp-` labels;
    - comments for repeated and related alerts, with no duplicate;
-   - Completed after the resolve, with a resolution.
+   - the configured done status (`DEMO_STATUS_DONE`, `Completed` by default) after the resolve, with a resolution.
 
    It also reads what the Runs wrote, in the stage where each fact first shows: the Summary names the group and the
    firing count; the Description names each firing Alert and carries its generator URL; the opening comment names each
@@ -336,8 +346,8 @@ Notification.
    timeline after the stop is: 2xx drop at about 45 s, rate zero at 65 s, health probe at 90 s and sustained outage
    at 151 s. All four share `incident_group=checkout-outage`.
 3. With `group_wait: 30s`, `group_interval: 1m` and `repeat_interval: 3m`, the first Notification arrives about
-   **75 s after the stop, carrying 2 alerts**. **One** Incident appears once that Run finishes, typically 1–2
-   minutes after the Notification.
+   **75 s after the stop, carrying 2 alerts**. **One** Incident appears once that Run finishes, typically within a
+   minute of the Notification (longer with investigation on a slower model).
 4. The health probe joins the Notification at about 135 s and the sustained outage at about 195 s after the stop.
    Each arrives as an update to the **same** Incident about a minute apart, plus the Runs' time and any queueing.
 5. **The cue to restart the traffic** is the sustained-outage update's Run finishing, not a clock. In the log
@@ -345,24 +355,32 @@ Notification.
    left out:
 
    ```
-   notification accepted: 4 alerts, run … queued, 0 ahead
+   notification accepted: 4 alerts, run … queued, <n> ahead
+   run … waits …s for Jira's search index before starting
    run … started in …
    [tool]   Bash: incident-payload update --key <KEY>-n --labels … --created … --server-time …
    [tool]   Bash: jira-as collaborate comment add <KEY>-n -b 'Update: 4 firing. New: rolldice outage is sustained (fp-…) value=…. Repeat: …'
-   [claude] ok: checkout-outage <KEY>-n updated and moved to <in-progress status>
+   [claude] ok: checkout-outage <KEY>-n updated …
    [result] success in …
    run … finished with exit status 0 in …
    ```
 
-   The comment says `New: rolldice outage is sustained`, and the `finished` line follows it. That is about 195 s after
-   the stop plus the Run's own 20 to 30 s, so about 4 minutes after the stop. Restart the traffic then
-   (`docker compose start traffic`).
+   The `waits` line shows when this Run follows the previous one by less than 30 s, and `<n>` is 1 when
+   the probe's Run is still running. The probe's update already moved the Incident to the in-progress
+   status, so this Run only updates it: its `[claude]` line says `updated` and how many labels it added,
+   in the model's words.
+
+   The comment says `New: rolldice outage is sustained`, and the `finished` line follows it. That is about 195 s
+   after the stop, plus any wait behind the earlier Runs (the Receiver runs one at a time and starts each at least
+   30 s after the previous one ends by default, `RUN_SETTLE_SECONDS`) and the Run's own 20 to 30 s, so about 4 to 5
+   minutes after the stop. Restart the traffic then (`docker compose start traffic`).
 6. Every rule is inactive within about 20 s. The Incident moves to the configured done status within about a minute
    of the restart, **plus that Run's time**. The queue is then empty, because it lists only unresolved Incidents,
    once Jira's search index catches up (10 to 20 s).
 
 **The shortest lifecycle take** is the path above: create, the probe's update, the sustained outage's update, and the
-resolve, four Runs. It never shows an unchanged repeat. The reason to restart on the cue is that Grafana resends an
+resolve, four Runs. It shows no unchanged repeat as long as the sustained-outage Run finishes before the first
+repeat. The reason to restart on the cue is that Grafana resends an
 unchanged firing group `repeat_interval` after the last Notification that changed it, so the first repeat arrives
 about 375 s (195 s plus 3 minutes) after the stop. A take that leaves the traffic stopped past that gets a comment-only
 Run, `Update: 4 firing. New: none. …`, and each further 3 minutes another, which costs a Run each (about a third of a
@@ -382,7 +400,8 @@ Three changes since the first rehearsals show in the log and in Jira.
   prints complete one-line `jira-as` commands. The Run runs them as printed. It still decides whether there is a Match
   and whether to create, update, close or skip. In the log, `[tool] Bash: incident-payload …` comes before the
   `jira-as` call it printed. The allow list is `Bash(jira-as *)`, `Bash(incident-payload *)` and the `Read` of the runs
-  directory (ADR 0003's 2026-10-01 amendment).
+  directory (ADR 0003's 2026-10-01 amendment); with investigation enabled it also has
+  `Bash(grafana-query *)` (ADR 0003's investigation amendment).
 - **One create attempt per Run, enforced by the Forwarder.** The first issue create a Run makes is its attempt, and the
   spawner registers the create fields `incident-payload create` would print for that Run's Notification. The
   Forwarder admits a single-issue create only when `fields.summary` and the parsed ADF `fields.description` equal
@@ -399,16 +418,33 @@ Three changes since the first rehearsals show in the log and in Jira.
 - **A close is checked.** After the transition to the done status, the Run reads `status` and `resolution` of the
   Incident, and ends `failed:` if it is done with no resolution. Until the Jira admin puts Resolution on the Resolve
   screen (`docs/admin-requests.md#jira-admin-resolution-screen`), each close also shows a WARNING
-  `forwarded POST … upstream said 400` on the transition and a retry that returns 204. That is the screen refusing the
-  resolution, not a Run failing, and the Incident still completes.
+  `forwarded POST … upstream said 400` on the transition and a retry that returns 204. That 400 is the screen
+  refusing the resolution, and the Incident still reaches the done status. Whether it has a resolution depends on
+  the workflow: with a post-function that sets one, the Run finishes `ok: `; without one, the read-back above ends
+  it `failed:` and `verify --mvp` stops at `completed`.
 
 Reads are narrow too: the Match search returns `key,status,labels,created`, every `issue get` names its `--fields`, and
 every JQL carries `project = <KEY>`, so a Run should log no `Output too large` and no refused JQL.
 
 ## 8. Reset and teardown
 
-Run `reset` (it asks before closing any leftover `fp-` or `grp-` Incidents), then `docker compose … down`. After a
-`reset` that stopped a take partway, settle (section 5) before the next one.
+Preview what the reset would change, then run it. It does not ask: it changes Jira at once.
+
+```bash
+python3 -m grafana_jsm_sandbox.reset --dry-run
+```
+
+```bash
+python3 -m grafana_jsm_sandbox.reset
+```
+
+It completes every open Incident in the project that carries an `fp-` label, from any session, and closes it
+when the workflow has a close step. It reports an Incident without an `fp-` label for a human.
+Then it runs `docker compose start traffic`, which starts the existing traffic container and does not
+undo an injected `ROLLDICE_SIDES` or `ROLLDICE_SLOW_MS`: after a malformed-input or slow-response take,
+first recreate traffic with that document's reset command. Tear down with `docker compose down`, adding
+the `-f` files or `--profile` the stack was started with. After a `reset` that stopped a take partway,
+settle (section 5) before the next one.
 
 ## Troubleshooting
 

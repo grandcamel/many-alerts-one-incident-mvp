@@ -296,3 +296,23 @@ def test_investigation_setup_defers_live_acceptance_and_retains_the_lifecycle_fa
     ):
         assert required in body, required
     assert "docs/mvp-runbook.md#optional-grafana-investigation" in body
+
+
+
+def test_env_permissions_are_the_engineer_s_terminal_step():
+    body = " ".join(text(SKILL).split())
+    assert (
+        "They make the ignored configuration mode 0600 in their own terminal "
+        "(`chmod 600` on `.env`; the copy does not) and keep it so."
+    ) in body
+
+
+def test_viewer_identity_claim_requires_checking_the_token():
+    body = " ".join(text(SKILL).split())
+    for required in (
+        "Grafana answers a wrong or missing token as the anonymous user",
+        'token shows a recent "Last used" time',
+        "Say, “These queries authenticate with a Viewer token,” only after that check",
+        "do not present the token as what limits the Run's Grafana access",
+    ):
+        assert required in body, required

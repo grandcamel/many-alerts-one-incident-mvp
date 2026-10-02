@@ -39,7 +39,11 @@ Layers in order: `host`, `env`, `jira`, `facts`, `stack`, `grafana`; from inside
 when an admin could take its cost away. Exit 0 `READY`, 1 `NOT READY`, 2 bad arguments or an
 old Python.
 
-**verify** (`python3 -m grafana_jsm_sandbox.verify [--replay | --live]`)
+**Chapter-one verify (historical output only).** `verify` without `--mvp` and chapter one's
+`replay` do not work with the MVP Run: the single-Alert fixtures have no
+`groupLabels.incident_group`, so parsing raises `PayloadError` and no create is registered.
+Use `verify --mvp --replay` or `verify --mvp --live` for the current demo, as in stage 8 of
+SKILL.md. The chapter-one output retained below is only for reading older logs.
 
 ```text
 [+<seconds>s] WAIT|OK|WARN|FAIL|NOTE <stage> — <message>[; ask: docs/admin-requests.md#<anchor>]

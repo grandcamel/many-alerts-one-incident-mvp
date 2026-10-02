@@ -226,7 +226,8 @@ file's comments say where each comes from:
   empty and commented. The Enterprise-seat prerequisite applies only to OAuth.
 - `DEMO_PROJECT_KEY`: the key from stage 1.
 
-They keep the ignored configuration mode-0600. They leave the unused model credential empty,
+They make the ignored configuration mode 0600 in their own terminal (`chmod 600` on `.env`; the copy does
+not) and keep it so. They leave the unused model credential empty,
 keep the four investigation variables commented for now, and tell
 you when the file is saved. Then:
 
@@ -324,13 +325,18 @@ docker compose up -d --force-recreate demo
 ```
 
 A restart keeps the old environment. Recreate the Viewer account/token after `lgtm` is recreated:
-`/data/grafana` has no persistent volume here. A 401 reads `grafana-query: unavailable: token rejected`.
+`/data/grafana` has no persistent volume here. A 401 would read `grafana-query: unavailable: token rejected`,
+but this stack never sends one: with anonymous Admin on, Grafana answers a wrong or missing token as the
+anonymous user and the queries still succeed. To check the token, the engineer opens Grafana's Service
+accounts page: the Viewer account's token shows a recent "Last used" time after a Run's queries only when
+the Run sent a valid token.
 
 With separate permission for stack work, follow the runbook's free pinned-image probe before any
 model or Jira rehearsal: the installed command, datasource-proxy GET, Viewer access, query output
 and Explore link on `grafana/otel-lgtm:0.33.0`. Confirm links in the presenter's browser under its
 identity; Viewer Explore access is not assumed. Say, “These queries authenticate with a Viewer
-token.” Grafana still allows anonymous Admin and its query traffic bypasses the Jira Forwarder.
+token,” only after that check, and do not present the token as what limits the Run's Grafana access:
+Grafana still allows anonymous Admin, and its query traffic bypasses the Jira Forwarder.
 
 For any paid Run or live Jira write, first settle site/project/session, model, dollar cap,
 acceptable added delay and go/no-go; the ground rules' consent still applies. Show investigation
@@ -466,11 +472,14 @@ named nothing, `doctor --only stack` ends `READY` with no `traffic` WARN.
 
 Give the engineer, briefly:
 
-- **Presenting:** `docs/demo-runbook.md`, in particular
-  `docs/demo-runbook.md#the-day-before-a-full-rehearsal`,
-  `docs/demo-runbook.md#fifteen-minutes-before-pre-demo-checks`,
-  `docs/demo-runbook.md#the-demo-step-by-step`, `docs/demo-runbook.md#fallback-the-replay` and
-  `docs/demo-runbook.md#reset-between-takes-or-after-a-bad-one`.
+- **Presenting:** `docs/mvp-runbook.md#5-before-every-take`, `docs/mvp-runbook.md#6-the-demo-itself`
+  and `docs/mvp-runbook.md#8-reset-and-teardown` for the grouped take, with
+  `docs/demo-runbook.md#the-screen` and `docs/demo-runbook.md#fifteen-minutes-before-pre-demo-checks`
+  for the screen and the checks. The day-before rehearsal is `verify --mvp --live`, and the fallback
+  is `verify --mvp --replay`: chapter one's `replay` posts single-Alert Notifications with no
+  `groupLabels.incident_group`, so the MVP payload tool raises `PayloadError` and no create is
+  registered. `python3 -m grafana_jsm_sandbox.replay` has no option for grouped fixtures; use
+  `verify --mvp --replay`.
 - **Investigation, if opted in:** `docs/mvp-runbook.md#optional-grafana-investigation` for the
   live-fault presentation, evidence limits and disabled fallback. Report probe, real-model and
   unavailable-evidence results separately from lifecycle verification.

@@ -11,7 +11,7 @@ reaching Jira through a localhost Forwarder that swaps a per-Run sentinel
 for the real token. Stop the traffic and an Incident appears in the queue; start it again and
 the Incident is Completed, with the trend commented in between. It was built as a demo of what a
 sandboxed boundary looks like when the audience may ask what else the Run can reach, and
-[the runbook](docs/demo-runbook.md) is the presenter's script.
+[the MVP runbook](docs/mvp-runbook.md) is the presenter's script.
 
 ## Quickstart
 
@@ -23,7 +23,8 @@ In Claude Code, ask to set up the demo and
 the tokens and admin requests only you can give, and asking before anything writes to Jira.
 
 1. **Prerequisites.** Docker with Compose v2 (2.17 or newer), Python 3.11 or newer, `jira-as`
-   2.x on your PATH, a Jira Cloud site, and a Claude seat that may run `claude setup-token`.
+   2.x on your PATH, a Jira Cloud site, and one model credential: an Anthropic API key, or a
+   Claude Code OAuth token from a seat that may run `claude setup-token`.
    [What you need](#what-you-need) says why each and how to get it. Check the Python first:
 
     ```bash
@@ -67,22 +68,26 @@ the tokens and admin requests only you can give, and asking before anything writ
    needs a Jira admin: forward
    [the create-project request](docs/admin-requests.md#jira-admin-create-project). Your account
    also needs a Jira Service Management agent licence, API tokens your organisation allows, and
-   a Claude seat allowed `claude setup-token`; [docs/admin-requests.md](docs/admin-requests.md)
-   has each request ready to forward. You need not guess which apply: a FAIL from the commands
+   only for the OAuth route, a Claude seat allowed `claude setup-token`;
+   [docs/admin-requests.md](docs/admin-requests.md) has each request ready to forward. You need not guess which apply: a FAIL from the commands
    below ends with `; ask: docs/admin-requests.md#<anchor>` when one does. A WARN may name one
    too; forward that only if you want what it says the demo goes without.
 
-3. **`.env`.** Copy the example:
+3. **`.env`.** Copy the example and make it readable by you alone:
 
     ```bash
     cp .env.example .env
     ```
 
+    ```bash
+    chmod 600 .env
+    ```
+
     and fill in five values in your own editor: `JIRA_SITE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`,
     `DEMO_PROJECT_KEY` and exactly one of `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`
-    (what `claude setup-token` prints), leaving the other empty. The
-    file's comments say where each comes from. Leave everything else as it is; `configure`
-    writes the rest.
+    (what `claude setup-token` prints), uncommenting the one you use and leaving the other empty
+    and commented. The file's comments say where each comes from. Leave everything else as it is;
+    `configure` writes the rest.
 
 4. **Read the project.** `configure` asks Jira about the project, through `jira-as` with the
    credential and key in `.env`, and changes nothing:
@@ -140,7 +145,7 @@ the tokens and admin requests only you can give, and asking before anything writ
     python3 -m grafana_jsm_sandbox.doctor --with-model
     ```
 
-9. **Fire the Alert.** Watch the log in one terminal:
+9. **Fire the Alerts.** Watch the log in one terminal:
 
     ```bash
     docker compose logs -f demo
@@ -153,26 +158,32 @@ the tokens and admin requests only you can give, and asking before anything writ
     ```
 
     Open the Incidents queue at the address `configure` printed on its `queue` line (kept in
-    `.env` as `DEMO_QUEUE_URL`). About a minute after the stop Grafana fires
-    and a Run creates the Incident; about a minute later a repeat Firing's Run comments the
-    trend and moves it to Work in progress. Then start the traffic again, and a third Run
-    completes it, which takes it out of the queue:
+    `.env` as `DEMO_QUEUE_URL`). About 75 seconds after the stop Grafana sends one Notification for two
+    related Alerts and a Run creates the one Incident. The health probe and then the sustained outage
+    join as updates to that same Incident, and the first update moves it to Work in progress. Once the
+    sustained-outage update's Run has finished in the log, about 4 to 5 minutes after the stop
+    ([the MVP runbook](docs/mvp-runbook.md#6-the-demo-itself)), start the traffic again, and one more
+    Run completes it, which takes it out of the queue:
 
     ```bash
     docker compose start traffic
     ```
 
-10. **Verify.** Once the Incident is Completed and Grafana shows the rule Normal, watch one
-    whole lifecycle stage by stage, replayed from the canned Notifications. Done is
-    `VERIFIED`:
+10. **Verify.** Once the Incident is Completed and Grafana shows every rule Normal, watch one
+    whole grouped lifecycle stage by stage, replayed from the grouped Notifications under
+    `fixtures/mvp/`. Done is `VERIFIED`:
 
     ```bash
-    python3 -m grafana_jsm_sandbox.verify
+    python3 -m grafana_jsm_sandbox.verify --mvp --replay
     ```
 
-    `verify --live` does step 9 unattended instead: it stops the traffic, watches, and starts
-    it again. Either refuses to start while an Incident for the Alert is still open, and says
-    to run the reset.
+    `verify --mvp --live` does step 9 unattended instead: it stops the traffic, waits for the
+    repeat and the sustained-outage Alert, and starts it again. Either refuses to start while an
+    open Incident already carries this take's group and session labels, and says to run the
+    reset. `verify` without `--mvp` is chapter one's single-Alert check: its canned Notifications
+    carry no `groupLabels.incident_group`, so the MVP payload tool raises `PayloadError` and no
+    create is registered. `python3 -m grafana_jsm_sandbox.replay` has no option for grouped fixtures;
+    use `verify --mvp --replay`.
 
 11. **Reset.** Take every Incident a Run left in the queue out of it and start the traffic.
     It writes to Jira without asking, so see first what it would change; this changes
@@ -188,9 +199,10 @@ the tokens and admin requests only you can give, and asking before anything writ
     python3 -m grafana_jsm_sandbox.reset
     ```
 
-    The demo is ready for its audience;
-    [the runbook](docs/demo-runbook.md) is how to present it. A Run that failed is in the log
-    with a `[FAILED]` line, and [its Transcript](#fetching-a-transcript) has the rest.
+    The demo is ready for its audience; [the MVP runbook](docs/mvp-runbook.md) is how to present
+    it, and [the chapter one runbook](docs/demo-runbook.md) has the screen layout and the pre-demo
+    checks. A Run that failed is in the log with a `[FAILED]` line, and
+    [its Transcript](#fetching-a-transcript) has the rest.
 
 ## Optional Grafana investigation
 
@@ -224,12 +236,14 @@ not a limit on its access. Query traffic bypasses the Jira Forwarder.
 A Run holds its model credential and, when enabled, a Grafana Viewer credential; Jira still
 uses the Forwarder's sentinel. The whole Grafana deployment is not read-only.
 
-The CLI offers `instant --query=EXPR`, `range --query=EXPR` and `get --path=PATH`, with flags
+The CLI offers `instant --query=EXPR`, `range --query=EXPR` and `get --path=PATH` for Prometheus,
+`logs --query=EXPR` for Loki, and `traces --query=EXPR` and `trace --id=ID` for Tempo, with flags
 after the subcommand and values given with `=`, so an expression that starts with `-` is not read
 as a flag. It reads its environment only and appends full JSON evidence to
 `grafana-evidence.jsonl` in the Run's directory. There is no query allow list, attempt budget,
-retry policy, response-size limit, sample cap or observation-window cap. The ten-second
-per-request elapsed timeout and first-five-line Transcript summary keep it usable; the
+retry policy, response-size limit, sample cap or observation-window cap; `logs` and `traces` ask
+for at most `--limit` results (100 and 20 by default), and a result at that limit is marked
+possibly incomplete. The ten-second per-request elapsed timeout and first-five-line Transcript summary keep it usable; the
 existing Run timeout still applies. The evidence comment starts with `[grafana-investigation] `
 and includes Observation, Interpretation, Unknown / next check and mechanical evidence with
 presenter links. Investigation comments do not count as lifecycle Runs at close or in verification.
@@ -314,13 +328,15 @@ not published. None of it has changed how the basic demo runs.
   <https://id.atlassian.com/manage-profile/security/api-tokens> with the site's bare address as
   `JIRA_SITE_URL`, or a service account's scoped token with the API gateway's
   `https://api.atlassian.com/ex/jira/<cloudId>`. The Forwarder holds it, and no Run ever does.
-- **A Claude Code OAuth token**, from `claude setup-token` on a machine where Claude Code is
-  logged in, on a seat your Claude organisation allows it for. It is the Run's model credential;
-  when investigation is enabled the Run also holds a Grafana Viewer credential. Each Run asks
-  for Opus 5 unless `RUN_MODEL` in `.env` names another model.
+- **One model credential**: an Anthropic API key (`sk-ant-api…`) from your organisation's
+  Anthropic Console as `ANTHROPIC_API_KEY`, or a Claude Code OAuth token from
+  `claude setup-token`, on a seat your Claude organisation allows it for, as `CLAUDE_CODE_OAUTH_TOKEN`.
+  Set exactly one and leave the other unset. It is the Run's model credential; when investigation is
+  enabled the Run also holds a Grafana Viewer credential. Each Run asks for Opus 5 unless
+  `RUN_MODEL` in `.env` names another model.
 - **Python 3.11 or newer** for the laptop commands (`configure`, `doctor`, `verify`, `reset`,
   `replay`). They are standard library only, so nothing is installed to run them; the tests
-  need pytest and PyYAML (below). Check `python3 --version`: the `python3` macOS ships is 3.9,
+  need the `dev` extra (below). Check `python3 --version`: the `python3` macOS ships is 3.9,
   and on it each command exits 2 with one sentence pointing here. Install 3.11 or newer
   (python.org or your package manager) and run every command with it, for example from a
   virtualenv made with `python3.11 -m venv .venv` and activated with `. .venv/bin/activate`.
@@ -415,27 +431,27 @@ clear, naming the admin request (`docs/admin-requests.md#<anchor>`) where one fi
 `READY` (exit 0) or `NOT READY: <first blocker>` (exit 1), and exit 2 is a usage error. The line
 format is in the module's docstring.
 
-`verify` then watches one whole lifecycle happen on the project, stage by stage:
+`verify --mvp` then watches the grouped MVP lifecycle happen on the project, stage by stage:
 
 ```bash
-python3 -m grafana_jsm_sandbox.verify
+python3 -m grafana_jsm_sandbox.verify --mvp --replay
 ```
 
 ```bash
-python3 -m grafana_jsm_sandbox.verify --live
+python3 -m grafana_jsm_sandbox.verify --mvp --live
 ```
 
-The first replays the canned Notifications at the Receiver; `--live` stops the traffic and
-watches the real Alert. It first refuses when an open Incident already carries the Fingerprint
-label (the Runs would comment on it rather than create one; `reset` takes it out), and notes
-which Incidents carry it already, so a rehearsal's leftover is never taken for this run's.
-`--replay`, the default, posts the Firing, the repeat and the Resolved, each once the Incident
-has answered the one before. `--live` stops the traffic, waits for Grafana's rule to fire, and
-starts the traffic again once the repeat has moved the Incident to Work in progress; it starts
-the traffic on the way out whatever happens, a failure or Ctrl-C included. Either way it
-watches, by JQL through `jira-as` with `.env`, for the Incident to be created, to get its
-opening comment, to reach Work in progress with a trend comment and to be Completed with a
-resolution, printing each stage with its elapsed time as
+The first replays the four grouped Notifications under `fixtures/mvp/`: three Alerts firing,
+their repeat, the sustained-outage Alert joining them, and all four resolved. Each is posted
+once the Incident has answered the one before. `--live` stops the traffic and watches the real
+grouped Alerts. Preflight refuses when an open Incident already carries the same group and
+session labels; use a fresh `DEMO_SESSION_ID` matching the Receiver and reset any leftover
+Incidents before the take. In live mode, traffic starts again after both the repeat and the
+sustained-outage update reach the Incident, in whichever order they arrive. It also starts
+on the way out after a failure or Ctrl-C. Either mode watches, by JQL through `jira-as` with
+`.env`, for one Incident with the group, session and Alert Fingerprint labels, its opening
+comment, later update comments, and completion with a resolution, printing each stage with
+its elapsed time as
 `[+<seconds>s] WAIT|OK|WARN|FAIL|NOTE <stage> — <message>`. A stage that does not come in time
 is named with its likely cause (``no Incident within 360s of the Firing: check `docker compose
 logs demo` for [FAILED]``), and Completed without a resolution names
@@ -693,6 +709,7 @@ than three restarts. On the laptop it reads them from the shell's environment, n
 | `JIRA_API_TOKEN` | The real token. It never reaches a Run |
 | `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` | What a Run authenticates with. Set exactly one, leaving the other empty |
 | `DEMO_PROJECT_KEY` | The dedicated project's key. No default |
+| `DEMO_SESSION_ID` | This take's session id, rendered into the `ses-` label. `demo` when unset |
 | `DEMO_SEVERITY_FIELD`, `DEMO_URGENCY_FIELD`, `DEMO_SOURCE_FIELD`, `DEMO_MAJOR_INCIDENT_FIELD` | The project's `customfield_<n>` ids, checked for shape and rendered into the Skill; empty means the project lacks the field and a Run leaves it off |
 | `RECEIVER_HOST` / `RECEIVER_PORT` | Where the Receiver listens. `0.0.0.0` and `8080` |
 | `RUNS_DIRECTORY` | Where each Run's working directory goes, and the rendered Skill in `.skill`. `runs` |
@@ -702,12 +719,17 @@ than three restarts. On the laptop it reads them from the shell's environment, n
 | `RUN_MODEL` | The model every Run asks for, logged at startup. `claude-opus-5` |
 | `RUN_BUDGET_USD` | The most one Run may spend, in dollars, as Claude Code estimates it (`--max-budget-usd`). No cap |
 
-Then drive it with the canned Notification sequence — a Firing, a repeat Firing, a Resolved —
-which is also the demo's fallback if Grafana is uncooperative:
+Then drive it with the grouped MVP verification, also the fallback if Grafana is
+uncooperative ([the MVP runbook](docs/mvp-runbook.md#4-prove-it-verify---mvp-paid-keep-to-your-budget)).
+`verify` reads the site, credentials and project from `.env`, not from the shell, so it needs a
+configured `.env` naming the same site and project as this Receiver. Give it this Receiver's
+session explicitly, since `.env`'s `DEMO_SESSION_ID` may differ from the shell's:
 
 ```bash
-python3 -m grafana_jsm_sandbox.replay --receiver http://localhost:8080 --pause 30
+python3 -m grafana_jsm_sandbox.verify --mvp --replay --receiver http://localhost:8080 --session "$DEMO_SESSION_ID"
 ```
+
+With `DEMO_SESSION_ID` unset in the shell, the Receiver uses `demo`, so pass `--session demo`.
 
 ## Running the demo in the container
 
@@ -764,12 +786,12 @@ EXTRA_CA_CERT=certs/corporate-root.crt docker compose up -d --build
 ```
 
 The Receiver answers on the compose network at `http://demo:8080`, which is what Grafana will
-post to, and on the laptop at `http://localhost:8080`, which is where the replay script posts by
+post to, and on the laptop at `http://localhost:8080`, where grouped MVP replay posts by
 default:
 
 ```bash
 curl -fsS http://localhost:8080/health
-python3 -m grafana_jsm_sandbox.replay --pause 30
+python3 -m grafana_jsm_sandbox.verify --mvp --replay
 ```
 
 Grafana is on the laptop at <http://localhost:3000>, anonymous admin, no login form.
@@ -785,7 +807,7 @@ never the containers' own ports, so the contact point is untouched:
 | `GRAFANA_HOST_PORT` | Grafana's laptop port, when 3000 is taken | `3000` |
 | `RECEIVER_HOST_PORT` | The Receiver's laptop port, when 8080 is taken | `8080` |
 
-The replay script's default follows `BIND_ADDRESS` and `RECEIVER_HOST_PORT` as compose does:
+Grouped MVP replay's default follows `BIND_ADDRESS` and `RECEIVER_HOST_PORT` as compose does:
 from `.env`, with the shell's own over it.
 
 ### Firing the Alert for real
@@ -839,6 +861,12 @@ docker compose stop traffic
 docker compose start traffic
 ```
 
+The following measurements are chapter-one history, not the grouped MVP timeline
+([the current take](docs/mvp-runbook.md#6-the-demo-itself)). Chapter one's `verify` without
+`--mvp` and `replay` do not work with the MVP Run: their single-Alert fixtures have no
+`groupLabels.incident_group`, so parsing raises `PayloadError` and no create is registered.
+Use `verify --mvp --replay` or `verify --mvp --live` for a current take.
+
 Measured on the owner's laptop, from the container log: the Firing Notification arrives 70s after the
 stop, the first repeat 70s after that, and the Resolved 20s after traffic is started again. The
 whole lifecycle — Incident created, moved to Work in progress with a trend comment, Completed
@@ -848,11 +876,11 @@ with Runs on Opus 5: Firing 52s after the stop, the Incident 38s after that, the
 later, Normal 15s after traffic started again, Completed 22s after that. That is 3m18s from the stop
 to Completed, three Runs, $1.13. `verify --replay` drove the same lifecycle in 85s for $1.14.
 
-The canned fixtures under `fixtures/` are the three Notifications Grafana posted during that
-rehearsal, so the replay script drives the same Alert, Fingerprint included. That is deliberate:
-if the live Alert has already opened an Incident when the fallback is needed, the replayed Firing
-comments on it rather than opening a second one, which is the demo working. It also means the
-replay and the live Alert must not be run at the same time.
+The chapter-one fixtures under `fixtures/` are the three Notifications Grafana posted during
+that rehearsal. They carried the same Alert and Fingerprint, so the historical replay could
+update an already-open Incident. The MVP instead uses the grouped fixtures under `fixtures/mvp/`;
+wait for Normal and an empty queue before `verify --mvp --replay`, and run it separately from
+live traffic-stop takes.
 
 Everything a Run does arrives in `docker compose logs -f demo` through the formatter — its own
 text, every `jira-as` command in full, every denial, and a `[FAILED]` line when it fails. Each
@@ -955,9 +983,10 @@ out again. `--dry-run` lists what it would change and changes nothing.
 
 ## Running the tests
 
-Python 3.11 or newer. The runtime is standard library only; the dev dependencies are pytest
-and PyYAML, which the container checks use to read `docker-compose.yml`. In a virtualenv, which
-git ignores as `.venv`:
+Python 3.11 or newer. The runtime is standard library only; the `dev` extra installs pytest, PyYAML,
+which the container checks use to read `docker-compose.yml`, Flask 3.1.2, which
+`tests/test_rolldice_fault.py` and `tests/test_slow_response.py` need, and the OpenTelemetry SDK and
+Flask instrumentation. In a virtualenv, which git ignores as `.venv`:
 
 ```bash
 python3 -m venv .venv
@@ -967,7 +996,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 ```
 
-pip fetches setuptools, pytest and PyYAML from the package index for that; behind a registry
+pip fetches setuptools and those packages from the package index for that; behind a registry
 mirror, point pip at it.
 
 `--basic-demo` runs only the basic demo's tests (chapter one: the Receiver, the Forwarder, the
@@ -985,17 +1014,14 @@ Without it, pytest runs everything, chapter two included, which takes a few minu
 ```
 
 The default run is offline: no Jira, no model, nothing but real HTTP on ephemeral ports and real
-child processes. The one test that touches Jira is opt-in: it is `verify` run as a test, so it
-asserts by JQL that the canned sequence drove one Incident in the demo's project to `Completed`
-with a resolution, stage by stage. It needs a Receiver already running, `jira-as` on the PATH and
-a filled-in `.env`, whose project and credential it uses. `DEMO_END_TO_END=live` runs `verify
---live` instead, `DEMO_RECEIVER_URL` points the replay at another Receiver and
-`DEMO_END_TO_END_RUN_TIMEOUT` gives each Run longer. Like `verify`, it closes and deletes nothing;
-`reset` takes out whatever a failed run leaves open:
-
-```bash
-DEMO_END_TO_END=1 python3 -m pytest tests/test_end_to_end.py
-```
+child processes. The opt-in `tests/test_end_to_end.py` is a chapter-one wrapper around `verify`
+without `--mvp`; its `DEMO_END_TO_END=live` mode uses chapter one's `verify --live`. This wrapper
+does not work with the MVP Run: its replay fixtures have no `groupLabels.incident_group`, and
+its watch expects a single-Alert Incident. For a current end-to-end rehearsal, use
+`verify --mvp --replay` or `verify --mvp --live` as in
+[the MVP runbook](docs/mvp-runbook.md#4-prove-it-verify---mvp-paid-keep-to-your-budget).
+The helpers only read Jira; the Runs write it, and `reset` takes out whatever a failed run
+leaves open.
 
 The checks that need the container are opt-in the same way, and need nothing but `docker compose
 up -d` first. They ask the questions compose cannot answer on its own: whether the health

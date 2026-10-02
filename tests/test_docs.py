@@ -241,8 +241,11 @@ def test_the_runbook_uses_the_shared_evidence_name_and_exact_comment_marker():
 
 
 def test_the_runbook_query_examples_use_only_frozen_subcommands_and_flags():
-    examples = re.findall(r"`(grafana-query (?:instant|range|get)\b[^`]+)`", RUNBOOK.read_text())
-    required = {"instant": "--query", "range": "--query", "get": "--path"}
+    examples = re.findall(r"`(grafana-query (?:instant|range|get|logs|traces|trace)\b[^`]+)`", RUNBOOK.read_text())
+    required = {
+        "instant": "--query", "range": "--query", "get": "--path",
+        "logs": "--query", "traces": "--query", "trace": "--id",
+    }
     found = set()
     for example in examples:
         words = example.split()
@@ -252,3 +255,89 @@ def test_the_runbook_query_examples_use_only_frozen_subcommands_and_flags():
         assert len(words) == 3 and words[:2] == ["grafana-query", command]
         assert words[2].startswith(required[command] + "=") and words[2] != required[command] + "="
     assert found == set(required)
+
+
+@pytest.mark.parametrize(
+    "document", [REPOSITORY / "README.md", REPOSITORY / "docs/demo-runbook.md", SETUP_SKILL]
+)
+def test_presenters_use_grouped_verification_and_name_the_incompatible_replay(document):
+    body = " ".join(document.read_text().split())
+    for required in (
+        "mvp-runbook.md", "verify --mvp --live", "verify --mvp --replay",
+        "groupLabels.incident_group", "PayloadError", "no create is registered",
+        "replay` has no option for grouped fixtures",
+    ):
+        assert required in body, required
+
+
+def test_reset_guidance_names_its_immediate_writes_scope_and_fault_recovery():
+    body = " ".join(RUNBOOK.read_text().split()).split("## 8. Reset and teardown", 1)[1]
+    for required in (
+        "It does not ask: it changes Jira at once",
+        "python3 -m grafana_jsm_sandbox.reset --dry-run",
+        "python3 -m grafana_jsm_sandbox.reset",
+        "`fp-` label, from any session",
+        "when the workflow has a close step",
+        "does not undo an injected `ROLLDICE_SIDES` or `ROLLDICE_SLOW_MS`",
+        "first recreate traffic", "docker compose down",
+    ):
+        assert required in body, required
+
+
+def test_create_timing_includes_the_investigation_qualification():
+    body = " ".join(RUNBOOK.read_text().split())
+    assert "typically within a minute of the Notification (longer with investigation on a slower model)" in body
+
+
+def test_readme_runnable_verification_examples_use_the_grouped_mvp():
+    body = (REPOSITORY / "README.md").read_text()
+    examples = re.findall(r"```bash\n(.*?)```", body, re.DOTALL)
+    commands = [
+        line.strip()
+        for example in examples
+        for line in example.splitlines()
+        if "-m grafana_jsm_sandbox.verify" in line
+    ]
+    assert commands
+    for command in commands:
+        assert "--mvp" in command, command
+        assert "--replay" in command or "--live" in command, command
+    assert not any("-m grafana_jsm_sandbox.replay" in example for example in examples)
+    assert "This wrapper does not work with the MVP Run" in " ".join(body.split())
+    assert "`claude setup-token`" in body
+    assert not re.search(r"`claude setup-[\s\n]+token`", body)
+
+
+def test_chapter_one_output_reference_is_explicitly_historical_and_incompatible():
+    body = " ".join((SETUP_SKILL.parent / "READING-OUTPUT.md").read_text().split())
+    for required in (
+        "Chapter-one verify (historical output only)",
+        "do not work with the MVP Run", "groupLabels.incident_group",
+        "PayloadError", "no create is registered",
+        "Use `verify --mvp --replay` or `verify --mvp --live` for the current demo",
+    ):
+        assert required in body, required
+
+
+def test_presenter_narration_qualifies_investigation_permissions_and_file_output():
+    body = " ".join((REPOSITORY / "docs/demo-runbook.md").read_text().split())
+    for required in (
+        "With investigation disabled, its allow list has three rules",
+        "With investigation enabled, `run_command.py` adds `Bash(grafana-query *)` as a fourth rule",
+        "`investigate` subcommand also writes one ADF body file in the Run's directory",
+        "--body-file", "three-rule allow list when investigation is disabled (four rules when enabled)",
+    ):
+        assert required in body, required
+    assert "only prints" not in body
+
+
+def test_chapter_one_reset_guidance_also_recovers_injected_traffic_settings():
+    body = " ".join((REPOSITORY / "docs/demo-runbook.md").read_text().split())
+    for required in (
+        "`reset.py` only starts the existing container",
+        "recreate traffic with the defaults", "ROLLDICE_SIDES=6", "ROLLDICE_SLOW_MS=0",
+        "loki-investigation.md#optional-malformed-input-fault",
+        "slow-response-investigation.md#inject-inspect-recover",
+    ):
+        assert required in body, required
+    assert "the one thing the reset cannot fix" not in body

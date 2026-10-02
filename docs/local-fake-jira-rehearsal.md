@@ -44,14 +44,18 @@ That is the one host-side arrangement. There is no switch anywhere that could se
 rehearsal to a real site: what decides is `JIRA_SITE_URL` alone, exactly as for a real site. The Forwarder accepts
 `http://` sites as it always has, and nothing in it changed.
 
-If 8090 is taken, set `FAKE_JIRA_PORT=18090` (in `.env` or the shell) and use `http://fakejira:18090`: the variable
-moves the container's port and the published port together, which is what keeps one value valid on both sides.
+If 8090 is taken, set both `FAKE_JIRA_PORT=18090` and `JIRA_SITE_URL=http://fakejira:18090` in `.env`, and
+use port 18090 in the `curl` lines below. The variable moves the container's port and the published port
+together, which is what keeps one value valid on both sides; in `.env` it also survives every later
+`docker compose` command, where a shell-only value would be lost.
 
 ## 0. Prerequisites
 
 Everything in `docs/mvp-runbook.md` section 0, plus jira-as 2.0.0 on the Mac (`pip install
-jira-as==2.0.0`; `doctor --only host` checks it). Nothing here needs a Jira account, an Atlassian API token or a
-network beyond Docker Hub and the Anthropic API.
+jira-as==2.0.0`; `doctor --only host` checks it). Nothing here needs a Jira account or an Atlassian API
+token. It needs the Anthropic API while Runs run and, for the build and the jira-as install, Docker Hub,
+`registry.npmjs.org`, `pypi.org` with `files.pythonhosted.org`, and `deb.debian.org`
+([Network](admin-requests.md#network)).
 
 ## 1. `.env`
 

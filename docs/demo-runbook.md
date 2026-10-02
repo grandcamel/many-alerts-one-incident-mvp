@@ -1,10 +1,11 @@
 # Demo runbook: Grafana Alert to Incident
 
-For the presenter, to be followed cold. The demo is one Alert's lifetime: traffic stops, Grafana
-fires, a Run opens an Incident; Grafana repeats, a Run adds a trend and moves it on; traffic
-returns, Grafana resolves, a Run completes it. About four minutes from the one action to the
-Incident leaving the queue, three Runs, about $1.15 on Opus 5, the default (measured
-2026-09-24; it was about $0.50 on Fable 5.1).
+For the presenter, to be followed cold. The demo is one Incident's lifetime for a group of related
+Alerts: traffic stops, Grafana fires several rules, a Run opens one Incident; as more rules join, Runs
+update that same Incident and move it on; traffic returns, Grafana resolves, a Run completes it. The
+shortest take is four Runs, and [the MVP runbook](mvp-runbook.md#6-the-demo-itself) has its log lines,
+timings and the cue to start the traffic. The times and costs below were measured with chapter one's
+single rule (2026-09-24: about four minutes and three Runs, about $1.15 on Opus 5; about $0.50 on Fable 5.1).
 
 Vocabulary is [CONTEXT.md](../CONTEXT.md). Every command below is run from the repo root, in a
 shell that has Docker and `jira-as`, with the demo set up as the README's Quickstart leaves it:
@@ -122,20 +123,24 @@ no further. Where Docker Desktop's policy refuses one, the request to forward is
 
 ## The day before: a full rehearsal
 
-Rehearse one whole lifecycle with the real Alert, unattended, and let it name the stage that did
-not come:
+Rehearse one whole grouped lifecycle with the real Alerts, unattended, and let it name the stage that
+did not come:
 
 ```bash
-python3 -m grafana_jsm_sandbox.verify --live
+python3 -m grafana_jsm_sandbox.verify --mvp --live
 ```
 
-It stops the traffic, waits for Grafana to fire, watches the Incident be created, commented and
-moved to Work in progress, starts the traffic again and watches it be Completed with a
-resolution, printing each stage with its elapsed time. It ends `VERIFIED` or `NOT VERIFIED:
-<stage> — <why>`, and starts the traffic on the way out whatever happens. Without `--live` it
-replays the canned Notifications instead, which needs no Grafana. Run it the day before, or at
-least well before the fifteen minutes below: it leaves a Completed Incident behind and, live,
-takes the rule through Firing. Then run the reset (step 3 below).
+It stops the traffic, waits for Grafana's rules to fire, watches one Incident be created with the
+group and session labels, updated for the repeat and for the sustained-outage Alert, then starts the
+traffic again and watches it reach the configured done status with a resolution, printing each stage
+with its elapsed time. It ends `VERIFIED` or `NOT VERIFIED: <stage> — <why>`, and starts the traffic
+on the way out whatever happens. It waits for a repeat, so it takes up to about 30 minutes. For a
+replay, use `verify --mvp --replay`: it posts the grouped Notifications under `fixtures/mvp/`
+instead of waiting for Grafana to send them. If Grafana answers the preflight, its rule must be
+Normal; if it is unavailable, replay warns and continues. Run it the day before, or at least well
+before the fifteen minutes below: it leaves a completed Incident behind and, live, takes the rules
+through Firing. Then run the reset (step 3 below). `verify` without `--mvp` is chapter one's single-
+Alert check; its replay Notifications carry no `incident_group`, which this demo's Runs need.
 
 ## Fifteen minutes before: pre-demo checks
 
@@ -249,10 +254,11 @@ The README's "Firing the Alert for real" has the conditions and the file.
 Times are from the one action, measured in the rehearsal this runbook was written from (the
 record is at the bottom), on Grafana 12.3.1 and Runs on Fable 5.1, with chapter one's single rule
 and a one-minute repeat; with the grouped rule set the repeat comes every three minutes and the
-updates come as the related rules join, so expect the later rows to move. A `verify --live` on the pinned
-Grafana 13.2.1 with Runs on Opus 5 (2026-09-24) ran a little faster: Firing 52s after the stop,
-the Incident 38s later, the whole lifecycle 3m18s. Your own `verify --live` gives your laptop's figures. Grafana's
-parts add up: the rate window empties, then the thirty-second pending period, then the next
+updates come as the related rules join, so expect the later rows to move. Chapter one's historical
+`verify --live` on the pinned Grafana 13.2.1 with Runs on Opus 5 (2026-09-24) ran a little faster:
+Firing 52s after the stop, the Incident 38s later, the whole lifecycle 3m18s. Your own
+`verify --mvp --live` gives your laptop's
+grouped figures. Grafana's parts add up: the rate window empties, then the thirty-second pending period, then the next
 ten-second evaluation. The waits are real and worth narrating rather than filling.
 
 | When | Presenter does | Audience sees | Say meanwhile |
@@ -260,20 +266,24 @@ ten-second evaluation. The waits are real and worth narrating rather than fillin
 | T+0:00 | In the hidden shell: `docker compose stop traffic` (returns in about a second) | Nothing yet | What just happened: the only synthetic traffic to rolldice stopped. Grafana is about to notice |
 | ~T+0:30 | Nothing | Grafana: **Pending** (reload) | The rule: request rate zero for thirty seconds, evaluated every ten. Point at the log: nothing has happened yet, because nothing has been sent |
 | ~T+1:00 | Nothing | Grafana: **Firing** (reload) | Grafana has now posted one Notification at the Receiver. The Receiver acknowledged it in milliseconds and queued one Run |
-| ~T+1:10 | Nothing | Log: `notification accepted: 1 alert, run ... queued, 0 ahead`, `run ... started`, then `[claude]` lines, then `[tool] Bash: jira-as search jql ...`, then `forwarded GET ... upstream said 200` | Walk the log as it scrolls: it read the Notification, searched the project for the Fingerprint label, found nothing, is creating. Every `forwarded` line is the Forwarder swapping the sentinel for the real token |
-| ~T+1:35 | Reload the queue | **<KEY>-n** in the queue, status Open, Sev-1, Urgency Critical, Source Monitoring systems (each only where the project has the field) | Open it. Summary from the alert name and instance; Description with the annotations and the generator link; the `fp-` label; the opening comment with the value. The Run took about 30s |
-| ~T+2:20 | Nothing | Log: second `run ... started` | This is the repeat: the policy resends a Firing group every three minutes, and sends it sooner, on the next group interval, when a related rule joins it. The Run finds the Match this time |
-| ~T+2:45 | Reload the Incident | A trend comment: `Still firing. value=0 (previous value=0, unchanged). Open for 1m..`; status **Work in progress** | The comment reports value, change, time open, all read off Jira's clock. First repeat moves it on; later repeats only comment |
-| ~T+2:50 | In the hidden shell: `docker compose start traffic` | Nothing yet | Traffic is back. Grafana needs one evaluation to see the rate, then sends the Resolved on the next group tick |
-| ~T+3:05 | Nothing | Grafana: **Normal**; log: third `run ... started` | The Run is closing it: one comment with total duration and Firing count, then the `Resolve` transition with resolution Done |
-| ~T+3:35 | Wait 20s, then reload the queue | Queue **empty**; the Incident is **Completed** with resolution Done | Completed, not Closed: a human closes, and Completed is the clean trigger for chapter three |
+| ~T+1:10 | Nothing | Log: `notification accepted: 2 alerts, run ... queued, 0 ahead`, `run ... started`, then `[claude]` lines, then `[tool] Bash: incident-payload match` and the `jira-as search jql ...` it printed, then `forwarded GET ... upstream said 200` | Walk the log as it scrolls: it read the Notification, searched the project for an open Incident with this group's and this take's labels, found nothing, is creating. Every `forwarded` line is the Forwarder swapping the sentinel for the real token |
+| After the create Run | Reload the queue | **<KEY>-n** in the queue, status Open, Sev-1, Urgency Critical, Source Monitoring systems (each only where the project has the field) | Open it. Summary names the group and firing count; Description lists the firing Alerts and their generator links; `grp-`, `ses-` and `fp-` labels; the opening comment with the value. The Run took about 30s |
+| ~T+2:20 | Nothing | Log: second `run ... started` | This is the health probe joining: the policy sends the group again on the next group interval when a related rule joins it. The Run finds the Match this time |
+| ~T+2:45 | Reload the Incident | An update comment: `Update: 3 firing. New: rolldice health probe is failing (fp-…) value=…. Repeat: …`; status **Work in progress** | The comment sorts the Alerts into new, repeat and resolved, with how long the Incident has been open, read off Jira's clock. The first update moves it on; later ones only comment |
+| After the sustained-outage Run, about T+4–5m | In the hidden shell: `docker compose start traffic` | Nothing yet | Traffic is back. Grafana needs one evaluation to see the rate, then sends the Resolved on the next group tick |
+| After recovery | Nothing | Grafana: **Normal**; log: resolve `run ... started` | The Run is closing it: one comment with total duration, Alert count and Run count, then the `Resolve` transition with resolution Done |
+| After the resolve Run | Wait 20s, then reload the queue | Queue **empty**; the Incident is **Completed** with resolution Done | Completed, not Closed: a human closes, and Completed is the clean trigger for chapter three |
 
-Whole lifecycle, stop to Completed: about three and a half minutes. Jira's search index lags a
-resolution by ten to twenty seconds, so a queue reloaded the instant the log says `finished`
-can still show the Incident. Count to twenty, then reload.
+With the grouped rules there is one more update before the restart: the sustained outage joins at
+about 3m15, and the cue to start the traffic is that update's Run finishing in the log, about 4 to 5
+minutes after the stop ([the MVP runbook](mvp-runbook.md#6-the-demo-itself)), so follow that cue
+rather than the old chapter-one clock. Jira's search index lags a resolution by ten to twenty
+seconds, so a queue reloaded the instant the log says `finished` can still show the Incident. Count
+to twenty, then reload.
 
-If a third `run` never starts because the repeat and the resolve landed close together, that is
-Grafana coalescing, not a failure: the Resolved Run still arrives, one group interval later.
+Notifications can be grouped or coalesced, so follow the log and the Incident's comments rather than a
+fixed Run count. The Resolved Notification still comes, at most one group interval after the rules go
+Normal, and its Run completes the Incident.
 
 A Run that fails says so, whatever its exit status: its `[result]` line becomes `[FAILED]`
 (ERROR) with the reason, a `[hint]` under it when the cause is a known one (the Claude token,
@@ -293,11 +303,13 @@ A re-fire deliberately gets a new Incident, which is the chapter two story, not 
 These are the five points the audience is there for, in the order the demo makes them
 available. Each has one thing on screen to point at.
 
-**The Run can only run jira-as and one payload printer.** A Run is headless Claude Code in print mode with
-`--permission-mode dontAsk` and an allow list of exactly three rules: `Bash(jira-as *)`,
-`Bash(incident-payload *)`, a local command that only prints the `jira-as` lines to run, and `Read`
-of the runs directory, which holds each Run's Notification and Transcript and the rendered Skill,
-and nothing else.
+**The Run's tools are explicitly allowed.** A Run is headless Claude Code in print mode with
+`--permission-mode dontAsk`. With investigation disabled, its allow list has three rules:
+`Bash(jira-as *)`, `Bash(incident-payload *)`, and `Read` of the runs directory, which holds
+each Run's Notification and Transcript and the rendered Skill. With investigation enabled,
+`run_command.py` adds `Bash(grafana-query *)` as a fourth rule.
+`incident-payload` prints the `jira-as` lines to run; its `investigate` subcommand also writes
+one ADF body file in the Run's directory for `jira-as ... --body-file ... --format adf`.
 Anything else is denied without a prompt, and the denial is printed on a `[DENIED]` line in the
 log window (ADR 0003). Show the command line:
 
@@ -305,7 +317,8 @@ log window (ADR 0003). Show the command line:
 python3 -m grafana_jsm_sandbox.run_command runs <KEY>
 ```
 
-with the project's key for `<KEY>`.
+with the project's key for `<KEY>`. This command prints the investigation-disabled baseline;
+investigation-enabled Runs add the fourth rule described above.
 
 The live Runs have so far never tried anything off the list, so the log has shown no denial.
 The recorded Transcript in the repo has one, from a Run that was asked to `ls /etc`; render it
@@ -336,8 +349,9 @@ file; a non-root user, from the Dockerfile; no Docker socket; and credentials be
 which is the Forwarder. Say which is whose. All of those controls are the guide's, the
 Forwarder being its credential-proxy recommendation done for Jira. This repo's own are the
 image carrying nothing but Claude Code and `jira-as` (ADR 0005), the sizes of the limits, the
-sentinel the Forwarder swaps, and the `dontAsk` permission mode with its three-rule allow list,
-which the guide is explicit is a permission gate and not a boundary. Two things the guide has
+sentinel the Forwarder swaps, and the `dontAsk` permission mode with its three-rule allow list
+when investigation is disabled (four rules when enabled), which the guide is explicit is a
+permission gate and not a boundary. Two things the guide has
 that the demo does not: a custom seccomp profile (Docker's default one is what runs) and
 `--network none`, because the Receiver must accept Grafana's Notifications and reach Jira and
 Anthropic; an egress allowlist of exactly those hosts is the next step, not what is running. The pre-demo check read every control back from the
@@ -379,19 +393,19 @@ docker compose start traffic
 ```
 
 ```bash
-python3 -m grafana_jsm_sandbox.replay --receiver http://localhost:8080 --pause 45
+python3 -m grafana_jsm_sandbox.verify --mvp --replay
 ```
 
-Traffic first, so that if Grafana wakes up mid-replay it goes Normal and sends at most a
-Resolved, which a Run skips when the Incident is already Completed. The replay then posts the
-three Notifications Grafana sent in a real rehearsal, Firing, repeat, Resolved, forty-five
-seconds apart, and the log, the queue and the Incident do exactly what the table above says,
-minus Grafana's own state changes. It runs about two and a half minutes.
-
-The fixtures carry the real Alert's Fingerprint. If the live Firing had already opened an
-Incident before Grafana went quiet, the replayed Firing comments on it instead of opening a
-second: that is the Match working, and the demo is intact. The one thing not to do is run the
-replay while Grafana is still Firing and posting.
+Traffic first, so the rules go back to Normal; wait for Normal before replaying. `verify` refuses to
+start while `rolldice request rate is zero` is not Normal, or while an open Incident already carries
+this take's group and session labels, and then names the cleanup needed. If Grafana does not answer,
+replay warns and continues. It posts the four grouped Notifications under `fixtures/mvp/`, each once
+the Incident has answered the one before, and prints each stage; the log, the queue and the Incident
+show the grouped lifecycle, minus Grafana's own state changes. It takes a few minutes. Do not use
+`python3 -m grafana_jsm_sandbox.replay` here: it posts chapter one's single-Alert Notifications,
+which carry no `groupLabels.incident_group`, so the MVP payload tool raises `PayloadError` and no
+create is registered. This demo's Runs cannot match, create or update anything with them. `python3
+-m grafana_jsm_sandbox.replay` has no option for grouped fixtures; use `verify --mvp --replay`.
 
 ## Reset: between takes, or after a bad one
 
@@ -431,8 +445,13 @@ run it, then wait for Grafana to show Normal before the next `stop traffic`. If 
 in progress in the log, let it finish first; a stuck one is killed by the Receiver after five
 minutes and the queue moves on.
 
-A change to a provisioning file is the one thing the reset cannot fix: `docker compose restart
-lgtm`, then a minute for Grafana to come back.
+Reset does not reload changed provisioning files: run `docker compose restart lgtm`, then
+allow a minute for Grafana to come back. It also leaves injected malformed-input or slowdown
+settings in the traffic container: `reset.py` only starts the existing container. Before the
+next take, recreate traffic with the defaults (`ROLLDICE_SIDES=6`, and `ROLLDICE_SLOW_MS=0`
+for the slow-response overlay), following the recovery commands in
+[Loki investigation](loki-investigation.md#optional-malformed-input-fault) and
+[slow-response investigation](slow-response-investigation.md#inject-inspect-recover).
 
 ## Rehearsal record
 

@@ -48,8 +48,10 @@ Haiku and Sonnet friction. Whether model tier alone still decides reliability ha
 The owner was open to local tools in the Run's shell that help cheaper models build payloads, and `incident-payload`
 is that tool. It does the mechanical parts (summary, labels, fields, the ADF Description, comment text, which Alerts are
 new, repeat or resolved, and the duration) and leaves every judgment to the Run: whether there is a Match, and
-whether to create, update, close or skip. The tool is pure and local: it opens no socket, starts no process, writes no
-file and reads no environment variable, and the Forwarder's one-create rule holds whatever it prints.
+whether to create, update, close or skip. The tool is local: it opens no socket, starts no process and
+reads no environment variable, and the Forwarder's one-create rule holds whatever it prints. Its lifecycle
+steps write no file; `investigate`, added after this record, writes one ADF body file under the Run
+directory and prints a `--body-file` command (ADR 0003's 2026-10-02 amendment).
 
 ## Not verified live
 

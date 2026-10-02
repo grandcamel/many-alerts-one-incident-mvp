@@ -134,8 +134,11 @@ After the owner integrates the branch and chooses to rebuild the demo image:
    choosing its metric and log queries, then open the same Incident's evidence comment.
 4. Check that the Report distinguishes the observed stop in activity from the unknown
    cause. Resume traffic and complete the established lifecycle.
-5. Rehearse unavailable Loki while metric access remains usable, and confirm normal
-   lifecycle completion. Restore the test setup before the presentation.
+5. Rehearse unavailable Loki while metric access remains usable: stop the Loki process inside the
+   running `lgtm` container, leaving Grafana and Prometheus up, and confirm the create Run's evidence
+   comment keeps the metric evidence, discloses the missing logs, and the lifecycle completes. Restore
+   Loki with `docker compose restart lgtm`, not a recreate: a restart keeps Grafana's data and so the
+   Viewer token, which recreating `lgtm` loses.
 
 Do not run the old checkout and this worktree against the same Compose project during
 testing. The branch is prepared for the owner to integrate; it does not start or change
