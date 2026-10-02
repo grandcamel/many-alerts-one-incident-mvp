@@ -1,0 +1,38 @@
+{
+  "revision": "f910a5b75c493056c3a3404d8cf543559cdaa2d1",
+  "sources": [
+    [
+      "MVP behavior and verification contract",
+      "docs/mvp-spec.md"
+    ],
+    [
+      "Current runbook and investigation limits",
+      "docs/mvp-runbook.md"
+    ],
+    [
+      "Rehearsal evidence and post-fix gaps",
+      "docs/research/demo-run-findings-2026-10-01.md"
+    ],
+    [
+      "Actual queue and Run scheduling",
+      "grafana_jsm_sandbox/receiver.py"
+    ],
+    [
+      "Run credentials and Jira permission caveats",
+      "grafana_jsm_sandbox/run_spawner.py"
+    ],
+    [
+      "Container runtime and network setup",
+      "docker-compose.yml"
+    ],
+    [
+      "Skill matching and workflow behavior",
+      "skill/incident-sync/SKILL.md"
+    ],
+    [
+      "Chapter two scope and status",
+      "README.md"
+    ]
+  ],
+  "base": "https://github.com/grandcamel/many-alerts-one-incident-mvp/blob/f910a5b75c493056c3a3404d8cf543559cdaa2d1/"
+}
