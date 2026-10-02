@@ -47,7 +47,24 @@ with exact nanosecond timestamp strings and optional structured metadata. See th
 
 Each query still prints five short Transcript lines followed by the complete JSON
 record, and appends the record to `grafana-evidence.jsonl`. The evidence comment is
-built by `incident-payload investigate`, rather than by retyping log lines.
+built by `incident-payload investigate`, rather than by retyping log lines. The helper
+publishes its UTF-8 ADF under the current Run directory and prints a short command:
+
+```text
+jira-as collaborate comment add KEY --body-file GENERATED_BASENAME --format adf
+```
+
+Run the printed command as written. Its safe content-derived basename binds that
+command to the generated body; the helper accepts no arbitrary output path. It
+publishes atomically with mode `0600`, reuses only an identical regular non-symlink
+file, and refuses unsafe or conflicting destinations. File failures attempt temporary
+cleanup; write or cleanup failure prints no posting command. Preserve the successful lifecycle and
+report investigation unavailable. The 256 KiB local artifact cap is not a Jira
+acceptance guarantee. All investigation bodies use this interface, including
+metric-only and unavailable-evidence comments. Other lifecycle helpers are unchanged.
+The file remains mutable under the Run's existing filesystem authority; its digest
+name supplies provenance rather than a new security boundary. No permission rules,
+network/process access or Forwarder authority are added.
 
 Log evidence includes the expression, datasource, observation window, retrieval time,
 returned entry count, and an Explore link. It displays the newest three entries across
@@ -65,9 +82,11 @@ file retains the original control characters. JSON escaping alone did not suffic
 in a captured Run: normalization between its wire command and parsed tool input
 expanded `\u001b` into ESC, and command validation rejected hidden controls.
 The same normalization expanded Unicode-escaped apostrophes into shell syntax.
-The builder therefore emits UTF-8 JSON and uses standard shell quoting, including
-adjacent quoted segments for apostrophes. Literal punctuation remains data inside
-the argument; the Run copies the full printed command without decoding escapes.
+The earlier inline delivery used UTF-8 JSON and adjacent POSIX quote segments to
+preserve apostrophes. Native Claude subsequently denied a valid 23,623-byte inline
+command; its precise reason remains unresolved. File delivery keeps evidence text
+in UTF-8 JSON outside the shell command. Native permission admission and exact live
+posted-body read-back still require verification; this change does not diagnose the denial.
 As a conservative display boundary, literal Unicode escape notation such as
 `\u001b` becomes `[U+005C]u001b`, with a separate
 `[Unicode escape notation shown with U+005C]` notice. This changes the printable

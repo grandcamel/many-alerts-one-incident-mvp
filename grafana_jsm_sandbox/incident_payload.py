@@ -19,19 +19,21 @@ Run runs them as printed.
 Investigation also reads `grafana-evidence.jsonl` in the working directory and adds
 readable ADF evidence with presenter links to three judgments supplied by the Run.
 
-It is pure and local. Lifecycle steps read two files at fixed places, and no path named on its
+It is local. Lifecycle steps read two files at fixed places, and no path named on its
 command line: `notification.json` in the working directory, which is the Run's
 Notification, and `project.json` in the Skill the Receiver rendered for this
 start, `<runs directory>/.skill`, which is the working directory's parent's. That
 file holds the project facts the Skill already shows a Run: the key, the session
 label, the field ids and the done status (`skill_template.materialize` writes it).
-It opens no socket, starts no process, writes no file and reads no environment
-variable, so it holds nothing a Run does not, and it cannot reach Jira.
+It opens no socket, starts no process and reads no environment variable, so it
+holds nothing a Run does not and cannot reach Jira. Lifecycle steps write no
+files. Investigation publishes one private ADF artifact under the Run's working
+directory, accepting no output path, then prints a short Jira body-file command.
 
 Every command it prints is one line. Lifecycle text arguments use plain single
-quotes and contain no backslashes;
-investigation payloads may contain JSON escapes to preserve log punctuation and
-line breaks. Hidden log controls are displayed as printable code-point notation;
+quotes and contain no backslashes. Investigation commands contain a safe basename;
+the UTF-8 JSON artifact preserves evidence punctuation and line breaks. Hidden
+controls and literal Unicode escape notation have disclosed printable displays;
 the original evidence file stays unchanged.
 Alert text is made safe first (`plain`). Lines that
 start with `#` say what the next command does and are not commands; a literal
@@ -59,7 +61,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import shlex
 import sys
 import unicodedata
 from collections.abc import Sequence
@@ -69,6 +70,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
+from grafana_jsm_sandbox.investigation_artifact import ArtifactError, publish_comment
 from grafana_jsm_sandbox.investigation_contract import (
     EVIDENCE_FILENAME,
     EVIDENCE_SCHEMA_VERSION,
@@ -1054,18 +1056,6 @@ def evidence_display(record: dict) -> list[dict]:
     return nodes
 
 
-def _quoted_evidence(comment: dict) -> str:
-    """UTF-8 JSON in one POSIX shell argument, with printable hidden controls.
-
-    Unicode escape normalization was observed before command validation; escaped
-    apostrophes then became shell syntax and were lost. Emit punctuation literally
-    and let shlex.quote preserve apostrophes with adjacent quoted segments. Dollars
-    and backticks remain single-quoted data. JSON still encodes line breaks and
-    backslashes. This changes serialization, not the command permission boundary.
-    """
-    return shlex.quote(json.dumps(comment, ensure_ascii=False, separators=(",", ":")))
-
-
 def investigate(key: str, observation: str, interpretation: str, unknown: str, path: Path) -> list[str]:
     records, reason = read_evidence(path)
     evidence = []
@@ -1093,10 +1083,12 @@ def investigate(key: str, observation: str, interpretation: str, unknown: str, p
         *evidence,
     ])
     comment = {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": nodes}]}
-    body = (_quoted_evidence(comment) if any(record["command"] in ("logs", "traces", "trace")
-                                           for record in records)
-            else quoted(compact(comment)))
-    return [f"jira-as collaborate comment add {key} -b {body} --format adf"]
+    try:
+        body = json.dumps(comment, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        name = publish_comment(body, path.parent)
+    except (ArtifactError, UnicodeError) as failure:
+        raise PayloadError(str(failure)) from None
+    return [f"jira-as collaborate comment add {key} --body-file {name} --format adf"]
 
 
 # --- the command line ---

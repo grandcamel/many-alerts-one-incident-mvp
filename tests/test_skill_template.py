@@ -787,12 +787,30 @@ def test_enabled_tempo_guidance_uses_observed_traces_and_keeps_diagnosis_open():
                  "one targeted search and one relevant trace", "without an API time window",
                  "whole Unix seconds", "three longest returned", "five longest observed spans",
                  "backend partial status", "missing parents", "telemetry", "max(end)-min(start)",
-                 "Do not sum overlapping span durations", "adjacent quoted segments"):
+                 "Do not sum overlapping span durations", "--body-file"):
         assert fact in create
     for leak in ("slow_ms", "rolldice.wait", "sides=six", "500ms"):
         assert leak not in skill
     for heading in ("Step 2b", "Step 2c"):
         assert "grafana-query traces" not in section(skill, heading)
+
+
+def test_enabled_investigation_uses_bounded_file_delivery_without_new_authority():
+    skill = render(TEMPLATE, SESSIONED, investigation_enabled=True)
+    create = " ".join(section(skill, "Step 2a").split())
+    for fact in ("--body-file", "current Run directory", "content-derived basename",
+                 "256 KiB", "no posting command", "not a Jira acceptance guarantee",
+                 "generated basename identifies that body", "Copy the short command exactly",
+                 "do not modify, rebuild, overwrite or inline the body or change its basename",
+                 "unavailable while preserving the successful lifecycle"):
+        assert fact in create
+    for history in ("0600", "atomically", "symlinks", "native permission admission",
+                    "inline-command denial", "immutable security boundary"):
+        assert history not in create
+    assert "adjacent quoted segments" not in create
+    disabled = render(TEMPLATE, SESSIONED)
+    assert "--body-file" not in disabled
+    assert "content-derived basename" not in disabled
 
 
 def test_disabled_rendering_preserves_baseline_except_close_accounting():

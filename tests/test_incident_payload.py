@@ -866,8 +866,8 @@ def test_the_shapes_it_checks_are_the_ones_demo_config_holds_the_env_to():
 
 
 def test_it_imports_nothing_that_could_reach_out():
-    """Pure and local: no socket, no process, no environment, no file written. Its imports are
-    the standard library's parsing and data modules and two of this package's constants."""
+    """Local: no socket, process or environment; artifact writes have a bounded module.
+    Lifecycle steps still have no direct filesystem writers."""
     tree = ast.parse(Path(incident_payload.__file__).read_text())
     imported = set()
     named = set()
@@ -891,7 +891,7 @@ def test_it_imports_nothing_that_could_reach_out():
         "grafana_jsm_sandbox.loki_evidence",
         "grafana_jsm_sandbox.tempo_evidence",
         "re",
-        "shlex",
+        "grafana_jsm_sandbox.investigation_artifact",
         "sys",
         "unicodedata",
         "collections.abc",
@@ -1086,8 +1086,12 @@ def investigate_on(tmp_path, records):
     return command, working
 
 
-def investigation_body(command):
-    adf = json.loads(argument(command, "-b"))
+def investigation_artifact_body(command, working):
+    return (working / argument(command, "--body-file")).read_text(encoding="utf-8")
+
+
+def investigation_body(command, working):
+    adf = json.loads(investigation_artifact_body(command, working))
     return "".join(node["text"] for node in adf["content"][0]["content"])
 
 
@@ -1113,7 +1117,7 @@ def test_investigation_punctuation_link_and_real_jira_conversion(tmp_path, query
     assert "\\" not in command and "\n" not in command and "$'" not in command
     assert shlex.split(command)[:5] == ["jira-as", "collaborate", "comment", "add", "SANDBOX-7"]
     assert argument(command, "--format") == "adf"
-    body = argument(command, "-b")
+    body = investigation_artifact_body(command, working)
     assert body == json.dumps(json.loads(body), ensure_ascii=False, separators=(",", ":"))
     converted = richtext(body, "adf")
     captured = []
@@ -1164,8 +1168,8 @@ def test_investigation_includes_success_and_failures_in_append_order(tmp_path, s
     failure = evidence_record(status="unavailable", error={
         "kind": "token_rejected", "message": "token rejected", "http_status": 401})
     success = evidence_record(status=status)
-    command, _ = investigate_on(tmp_path, [failure, success])
-    body = investigation_body(command)
+    command, working = investigate_on(tmp_path, [failure, success])
+    body = investigation_body(command, working)
     assert "Observation: zero ’requests’ seen" in body
     assert body.index("unavailable: token rejected") < body.index(expected)
     assert " ; " in body and body.count("Open in Grafana") == 2
@@ -1177,16 +1181,16 @@ def test_investigation_includes_success_and_failures_in_append_order(tmp_path, s
     ([evidence_record(), {"schema_version": 2}], "evidence file unreadable"),
 ])
 def test_missing_empty_or_invalid_evidence_overrides_judgments(tmp_path, records, reason):
-    command, _ = investigate_on(tmp_path, records)
+    command, working = investigate_on(tmp_path, records)
     from jira_as.compat.richtext import richtext
 
-    adf = richtext(argument(command, "-b"), "adf")
+    adf = richtext(investigation_artifact_body(command, working), "adf")
     nodes = adf["content"][0]["content"]
     assert nodes[0] == {"type": "text", "text": "[grafana-investigation] "}
     assert [node["text"] for node in nodes if node.get("marks") == [{"type": "strong"}]] == [
         "Observation:", "Interpretation:", "Unknown / next check:", "Evidence:"]
     assert all(mark["type"] == "strong" for node in nodes for mark in node.get("marks", []))
-    assert investigation_body(command) == (
+    assert investigation_body(command, working) == (
         "[grafana-investigation] Observation: Evidence unavailable | Interpretation: "
         "No conclusion from Grafana | Unknown / next check: check ˋtrafficˋ⧵source | "
         f"Evidence: unavailable: {reason}")
@@ -1196,9 +1200,9 @@ def test_all_failed_evidence_deduplicates_reasons_in_first_seen_order(tmp_path):
     records = [evidence_record(status="unavailable", error={
         "kind": "unreachable", "message": message, "http_status": None})
         for message in ["unreachable", "token rejected", "unreachable"]]
-    command, _ = investigate_on(tmp_path, records)
-    assert investigation_body(command).endswith("Evidence: unavailable: unreachable; token rejected")
-    assert "observed zero" not in command
+    command, working = investigate_on(tmp_path, records)
+    assert investigation_body(command, working).endswith("Evidence: unavailable: unreachable; token rejected")
+    assert "observed zero" not in investigation_body(command, working)
 
 
 @pytest.mark.parametrize("raw", [b'{bad json}\n', b'\xff', b'\n', b'null\n'])
@@ -1210,13 +1214,13 @@ def test_unreadable_jsonl_is_unavailable_and_exits_zero(tmp_path, raw, capsys):
     assert main(investigation_argv(), working) == 0
     output = capsys.readouterr()
     assert output.err == "" and output.out.count("\n") == 1
-    assert "evidence file unreadable" in output.out
+    assert "evidence file unreadable" in investigation_body(output.out.strip(), working)
 
 
 def test_unreadable_evidence_path_is_unavailable(tmp_path):
     _, working = investigate_on(tmp_path, None)
     (working / "grafana-evidence.jsonl").mkdir()
-    assert "evidence file unreadable" in printed(investigation_argv(), working)[0]
+    assert "evidence file unreadable" in investigation_body(printed(investigation_argv(), working)[0], working)
 
 
 @pytest.mark.parametrize("command", ["instant", "get"])
@@ -1225,8 +1229,8 @@ def test_investigation_instant_and_discovery_wording(tmp_path, command):
     if command == "get":
         record["sample_summary"].update(result_type="discovery", series_count=0,
                                         sample_count=0, series=[], discovery_items=3)
-    line, _ = investigate_on(tmp_path, [record])
-    body = investigation_body(line)
+    line, working = investigate_on(tmp_path, [record])
+    body = investigation_body(line, working)
     assert "step " not in body
     if command == "instant":
         assert "at 2026-10-01T14:00:00.000Z; retrieved" in body
@@ -1242,12 +1246,12 @@ def test_nonzero_and_nonfinite_data_never_become_observed_zero(tmp_path, value):
     if value != "2":
         record["sample_summary"]["series"][0].update(min=None, max=None)
     record["presenter_link"] = None
-    command, _ = investigate_on(tmp_path, [record])
-    assert "observed zero" not in command
-    assert f"latest {value} at " in command and "no link" in command
+    command, working = investigate_on(tmp_path, [record])
+    assert "observed zero" not in investigation_body(command, working)
+    assert f"latest {value} at " in investigation_body(command, working) and "no link" in investigation_body(command, working)
     from jira_as.compat.richtext import richtext
 
-    nodes = richtext(argument(command, "-b"), "adf")["content"][0]["content"]
+    nodes = richtext(investigation_artifact_body(command, working), "adf")["content"][0]["content"]
     assert nodes[-1] == {"type": "text", "text": "no link"}
     assert not any(mark["type"] == "link" for node in nodes for mark in node.get("marks", []))
 
@@ -1255,8 +1259,8 @@ def test_nonzero_and_nonfinite_data_never_become_observed_zero(tmp_path, value):
 def test_unmodelled_data_is_not_zero_or_absent(tmp_path):
     record = evidence_record()
     record["sample_summary"].update(unmodelled_count=1)
-    command, _ = investigate_on(tmp_path, [record])
-    assert "observed zero" not in command and "unmodelled samples=1" in command
+    command, working = investigate_on(tmp_path, [record])
+    assert "observed zero" not in investigation_body(command, working) and "unmodelled samples=1" in investigation_body(command, working)
 
 
 @pytest.mark.parametrize("flag", ["--key", "--observation", "--interpretation", "--unknown"])
@@ -1288,9 +1292,9 @@ def test_investigation_rejects_wrong_project_key(tmp_path, capsys):
 def test_invalid_schema_invalidates_even_an_earlier_success(tmp_path, field, value):
     invalid = evidence_record()
     invalid[field] = value
-    line, _ = investigate_on(tmp_path, [evidence_record(), invalid])
-    assert "Evidence unavailable" in line and "evidence file unreadable" in line
-    assert "observed zero" not in line
+    line, working = investigate_on(tmp_path, [evidence_record(), invalid])
+    assert "Evidence unavailable" in investigation_body(line, working) and "evidence file unreadable" in investigation_body(line, working)
+    assert "observed zero" not in investigation_body(line, working)
 
 
 def test_mixed_nonfinite_and_zero_bounds_never_report_observed_zero(tmp_path):
@@ -1299,8 +1303,8 @@ def test_mixed_nonfinite_and_zero_bounds_never_report_observed_zero(tmp_path):
         {"metric": {}, "values": [[1, "NaN"], [2, "0"]]}])
     record["sample_summary"].update(sample_count=2, result_type="matrix")
     record["sample_summary"]["series"][0]["count"] = 2
-    line, _ = investigate_on(tmp_path, [record])
-    assert "observed zero" not in line and "2 samples" in line
+    line, working = investigate_on(tmp_path, [record])
+    assert "observed zero" not in investigation_body(line, working) and "2 samples" in investigation_body(line, working)
 
 
 @pytest.mark.parametrize("kind", ["scalar", "string"])
@@ -1308,8 +1312,8 @@ def test_a_scalar_zero_is_an_observed_sample(tmp_path, kind):
     record = evidence_record()
     record["response"]["data"].update(resultType=kind, result=[1790863800, "0"])
     record["sample_summary"]["result_type"] = kind
-    line, _ = investigate_on(tmp_path, [record])
-    assert "observed zero" in line
+    line, working = investigate_on(tmp_path, [record])
+    assert "observed zero" in investigation_body(line, working)
 
 
 def test_all_series_contribute_to_zero_classification_and_first_series_display(tmp_path):
@@ -1319,9 +1323,9 @@ def test_all_series_contribute_to_zero_classification_and_first_series_display(t
     summary["series"].append({"labels": {}, "count": 1, "latest": {"timestamp": 1, "value": "0"},
                               "min": "0", "max": "0"})
     record["response"]["data"]["result"].append({"metric": {}, "value": [1, "0"]})
-    line, _ = investigate_on(tmp_path, [record])
-    assert "2 series, 2 samples; latest 2 at " in line
-    assert "; min 2, max 2; +1 more series" in line and "observed zero" not in line
+    line, working = investigate_on(tmp_path, [record])
+    assert "2 series, 2 samples; latest 2 at " in investigation_body(line, working)
+    assert "; min 2, max 2; +1 more series" in investigation_body(line, working) and "observed zero" not in investigation_body(line, working)
 
 
 def test_investigation_still_validates_notification_and_facts(tmp_path, capsys):

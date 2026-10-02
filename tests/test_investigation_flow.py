@@ -46,7 +46,7 @@ VIEWER_TOKEN = "private-viewer-token-for-loopback-only"
 PRESENTER_URL = "http://presenter.example.invalid:3300"
 QUERY = 'sum(rate(http_server_duration_milliseconds_count{service_name="rolldice"}[5m]))'
 LOG_QUERY = '{service_name="rolldice"}'
-LOG_LINE = "demo's roll: 4"
+LOG_LINE = "demo's roll: 4; \"quoted\" $HOME `literal` café 🎲\nnext\\line"
 TRACE_QUERY = '{ resource.service.name = "rolldice" && span:duration > 250ms }'
 
 
@@ -430,6 +430,14 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
                     assert [
                         text.split(":", 1)[0].split(" ")[0] for text in incident.comment_texts
                     ] == ["Opened", "Update", "Update", "Resolved"]
+                    posted_comments = json.loads(read_jira(
+                        "collaborate", "comment", "list", f"{KEY}-1", "--limit", "200",
+                        "-o", "json",
+                    ))["comments"]
+                    posted_evidence = [
+                        comment["body"] for comment in posted_comments
+                        if is_investigation(comment_text(comment["body"]))
+                    ]
                     assert "FAILED" not in caplog.text
                 finally:
                     receiver.stop()
@@ -447,6 +455,27 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
     assert all("investigation" not in finish for finish in finishes[1:])
     evidence_files = [directory / EVIDENCE_FILENAME for directory in directories]
     assert [path.exists() for path in evidence_files] == [enabled, False, False, False]
+    body_files = [list(directory.glob("*.adf.json")) for directory in directories]
+    assert [len(paths) for paths in body_files] == [int(enabled), 0, 0, 0]
+    if enabled:
+        evidence_commands = [
+            block["input"]["command"]
+            for event in transcripts[0] if event.get("type") == "assistant"
+            for block in event["message"]["content"]
+            if block.get("type") == "tool_use"
+            and "--format adf" in block.get("input", {}).get("command", "")
+        ]
+        [delivery] = evidence_commands
+        words = shlex.split(delivery)
+        assert "--body-file" in words and "-b" not in words
+        assert len(delivery.encode("utf-8")) < 256
+        basename = words[words.index("--body-file") + 1]
+        assert Path(basename).name == basename
+        [body_file] = body_files[0]
+        assert body_file == directories[0] / basename
+        assert posted_evidence == [json.loads(body_file.read_text(encoding="utf-8"))]
+    else:
+        assert posted_evidence == []
     expected_error = {"unreachable": "unreachable", "401": "token_rejected", "timeout": "timeout"}
     if enabled:
         [record, *log_records] = [

@@ -268,9 +268,16 @@ incident-payload investigate --key <key> --observation '<observation>' --interpr
 ```
 
 Call it once and run its printed Jira command exactly as printed. It supplies
-one compact ADF comment using `--format adf`, with strong labels, code-marked display queries
+one ADF comment using `--body-file <generated basename>` and `--format adf`, with strong labels, code-marked display queries
 and exact presenter links in explicit link marks. Its first text node is the exact
-unmarked `[grafana-investigation] ` marker. When no query succeeds, or evidence is
+unmarked `[grafana-investigation] ` marker. The helper writes UTF-8 JSON under the
+current Run directory, using a safe content-derived basename and no output-path
+argument. The generated basename identifies that body. Copy the short command exactly
+as printed; do not modify, rebuild, overwrite or inline the body or change its basename.
+The 256 KiB cap bounds the local artifact; it is not a Jira acceptance guarantee.
+On file failure the helper prints no posting command; finish with investigation
+unavailable while preserving the successful lifecycle.
+When no query succeeds, or evidence is
 missing, empty, unreadable or corrupt, it overrides
 observation and interpretation with Evidence unavailable / No conclusion from
 Grafana, keeping your unknown / next check. If the builder refuses or posting fails,
@@ -278,23 +285,19 @@ finish the successful lifecycle with investigation unavailable as the Finish say
 For logs the builder includes the newest three returned excerpts, their exact
 nanosecond timestamps, labels and metadata, the returned count, and any limit
 warning. An excerpt longer than 600 characters is explicitly marked truncated;
-full original lines remain in the evidence file. The printed ADF argument may
-contain JSON escapes that preserve literal log punctuation and line breaks.
+full original lines remain in the evidence file. The UTF-8 ADF file preserves
+literal log punctuation and line breaks through JSON serialization.
 Hidden control characters other than LF, and Unicode line/paragraph separators,
 in log excerpts, queries, labels and
 metadata are displayed as printable `[U+XXXX]` notation, with an explicit
-`[control characters shown as U+XXXX]` notice. This display transformation avoids
-hidden characters in the command; the evidence file retains the original text.
+`[control characters shown as U+XXXX]` notice. This display transformation discloses
+hidden characters in the body; the evidence file retains the original text.
 Literal Unicode escape notation such as `\u001b` is displayed as `[U+005C]u001b`,
 with a separate `[Unicode escape notation shown with U+005C]` notice. The changed
 backslash is printable source text, not a hidden control. This conservative
 display rule prevents escape expansion in a local normalization replay; live
 normalization of double-escaped literals has not been confirmed. Ordinary
 backslashes, LF line breaks and emoji joiners retain their spelling.
-The printed ADF argument uses shell quoting that may include adjacent quoted
-segments to preserve apostrophes. Copy that complete command exactly as printed;
-do not decode JSON escapes or rebuild its quotes. This exception applies to the
-builder's investigation comment, whose literal evidence is already serialized.
 For Tempo, the builder shows the three longest returned search results and up to
 five longest observed spans from a fetched trace, with IDs, parents, services,
 statuses and durations. These are selected from returned data, not the globally
@@ -303,8 +306,8 @@ and available job counters; even backend complete or all jobs completed does not
 establish complete telemetry. The observed trace envelope is max(end)-min(start),
 not a sum of span durations. Empty search means no returned matches for that
 query and window; empty fetch means no returned spans, not a healthy application.
-Trace source text uses the same printable control/separator display and exact
-shell serialization as log evidence; full raw traces remain in the evidence file.
+Trace source text uses the same printable control/separator display and UTF-8
+file delivery as log evidence; full raw traces remain in the evidence file.
 <!-- investigation:end -->
 ## Step 2b — update the Incident
 

@@ -42,6 +42,12 @@ def logs_record():
     }
 
 
+def delivered_adf(command, tmp_path):
+    words = shlex.split(command)
+    working = tmp_path / "runs" / "20261001T140210-abc123"
+    return json.loads((working / words[words.index("--body-file") + 1]).read_text(encoding="utf-8"))
+
+
 def investigation(tmp_path, records):
     working = run_directory(tmp_path, canned(FIRING))
     (working / EVIDENCE_FILENAME).write_text(
@@ -50,8 +56,7 @@ def investigation(tmp_path, records):
         "investigate", "--key", "SANDBOX-7", "--observation", "returned log evidence",
         "--interpretation", "uncertain", "--unknown", "check next",
     ], working)
-    words = shlex.split(command)
-    comment = json.loads(words[words.index("-b") + 1])
+    comment = delivered_adf(command, tmp_path)
     nodes = comment["content"][0]["content"]
     return command, nodes, "".join(node.get("text", "") for node in nodes)
 
@@ -300,9 +305,8 @@ def test_observed_unicode_normalization_preserves_decoded_adf_punctuation(tmp_pa
     command, nodes, _ = investigation(tmp_path, [record])
     normalized = re.sub(r"\\u(001b|0027|0024|0060|2019|201d)",
                         lambda match: chr(int(match[1], 16)), command, flags=re.IGNORECASE)
-    wire_words, parsed_words = shlex.split(command), shlex.split(normalized)
-    wire_adf = json.loads(wire_words[wire_words.index("-b") + 1])
-    parsed_adf = json.loads(parsed_words[parsed_words.index("-b") + 1])
+    wire_adf = delivered_adf(command, tmp_path)
+    parsed_adf = delivered_adf(normalized, tmp_path)
 
     assert parsed_adf == wire_adf, "observed normalization changed decoded ADF punctuation"
     assert line in [node.get("text") for node in nodes]
@@ -353,9 +357,7 @@ def test_literal_unicode_escape_notation_is_disclosed_and_survives_normalization
     normalized = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match[1], 16)), command)
 
     assert normalized == command, "literal Unicode notation still expands in the replay"
-    words, normalized_words = shlex.split(command), shlex.split(normalized)
-    assert json.loads(words[words.index("-b") + 1]) == json.loads(
-        normalized_words[normalized_words.index("-b") + 1])
+    assert delivered_adf(command, tmp_path) == delivered_adf(normalized, tmp_path)
     assert len(command.splitlines()) == 1
     expected = (displayed if location in ("line", "query")
                 else json.dumps(displayed, ensure_ascii=False)[1:-1])

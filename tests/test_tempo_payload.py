@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import json
 import re
-import shlex
 from datetime import datetime
 
 import pytest
@@ -13,7 +12,7 @@ import pytest
 from grafana_jsm_sandbox.investigation_contract import EVIDENCE_FILENAME
 from grafana_jsm_sandbox.tempo_evidence import summarize_search, summarize_trace
 from tests.test_incident_payload import evidence_record
-from tests.test_loki_payload import END, STAMP, START, investigation
+from tests.test_loki_payload import END, STAMP, START, delivered_adf, investigation
 
 TRACE_ID = "0123456789abcdef0123456789abcdef"
 QUERY = '{ resource.service.name = "rolldice" && span:duration > 500ms }'
@@ -216,10 +215,8 @@ def test_tempo_text_and_queries_preserve_punctuation_controls_and_raw_data(tmp_p
     command_line, _, text = investigation(tmp_path, [record])
     normalized = re.sub(r"\\u(001b|0027|0024|0060|2019|201d|2028|2029)",
                         lambda match: chr(int(match[1], 16)), command_line, flags=re.IGNORECASE)
-    words, normalized_words = shlex.split(command_line), shlex.split(normalized)
 
-    assert json.loads(words[words.index("-b") + 1]) == json.loads(
-        normalized_words[normalized_words.index("-b") + 1])
+    assert delivered_adf(command_line, tmp_path) == delivered_adf(normalized, tmp_path)
     assert len(command_line.splitlines()) == 1 and "\x1b" not in text
     assert literal[:-3] + "[U+001B][U+2028][U+2029]" in text
     assert "[control characters shown as U+XXXX]" in text
@@ -258,9 +255,7 @@ def test_tempo_literal_unicode_escape_notation_survives_conservative_replay(tmp_
     normalized = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match[1], 16)), command_line)
 
     assert normalized == command_line, "literal Unicode notation still expands in the replay"
-    words, normalized_words = shlex.split(command_line), shlex.split(normalized)
-    assert json.loads(words[words.index("-b") + 1]) == json.loads(
-        normalized_words[normalized_words.index("-b") + 1])
+    assert delivered_adf(command_line, tmp_path) == delivered_adf(normalized, tmp_path)
     assert len(command_line.splitlines()) == 1
     assert displayed in text
     assert "[Unicode escape notation shown with U+005C]" in text
