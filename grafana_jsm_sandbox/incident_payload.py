@@ -28,9 +28,10 @@ label, the field ids and the done status (`skill_template.materialize` writes it
 It opens no socket, starts no process, writes no file and reads no environment
 variable, so it holds nothing a Run does not, and it cannot reach Jira.
 
-Every command it prints is one line the Run's permission boundary admits: no
-newline, no backslash, no `'\\''` and no `$'…'`, every argument that holds text in
-plain single quotes. Alert text is made safe for that first (`plain`). Lines that
+Every command it prints is one line the Run's permission boundary admits, with text
+arguments in plain single quotes. Lifecycle payloads contain no backslashes;
+investigation payloads may contain JSON escapes to preserve literal log evidence.
+Alert text is made safe first (`plain`). Lines that
 start with `#` say what the next command does and are not commands; a literal
 `<key>` stands where the Incident's key is not known yet.
 
@@ -70,6 +71,7 @@ from grafana_jsm_sandbox.investigation_contract import (
     EVIDENCE_SCHEMA_VERSION,
     INVESTIGATION_MARKER,
 )
+from grafana_jsm_sandbox.loki_evidence import summarize_logs
 from grafana_jsm_sandbox.notification import NOTIFICATION_FILENAME
 from grafana_jsm_sandbox.run_command import RENDERED_SKILL
 
@@ -638,7 +640,7 @@ def _evidence_record(record: object) -> dict:
         "response": (dict, list, str, *number, bool, type(None)),
     })
     if (record["schema_version"] != EVIDENCE_SCHEMA_VERSION
-            or record["command"] not in ("instant", "range", "get")
+            or record["command"] not in ("instant", "range", "get", "logs")
             or record["status"] not in ("ok", "empty", "unavailable")):
         raise ValueError("unknown schema, command or status")
     if (record["query"] is None) != (record["command"] == "get"):
@@ -658,7 +660,7 @@ def _evidence_record(record: object) -> dict:
     step = window["step_seconds"]
     if step is not None and (not Decimal(step).is_finite() or step <= 0):
         raise ValueError("invalid step")
-    if record["command"] in ("instant", "range") and (
+    if record["command"] in ("instant", "range", "logs") and (
         window["start"] is None or window["end"] is None
     ):
         raise ValueError("query window missing")
@@ -695,6 +697,43 @@ def _evidence_record(record: object) -> dict:
         if series["latest"] is not None:
             fields(series["latest"], {"timestamp": number, "value": string})
             datetime.fromtimestamp(float(series["latest"]["timestamp"]), UTC)
+    if record["command"] == "logs":
+        fields(record, {"log_summary": (dict, type(None))})
+        parameters = dict(record["parameters"])
+        if (len(record["parameters"]) != 5
+                or set(parameters) != {"query", "start", "end", "limit", "direction"}
+                or parameters["query"] != record["query"]
+                or parameters["start"] != window["start"]
+                or parameters["end"] != window["end"]
+                or parameters["direction"] not in ("forward", "backward")
+                or not re.fullmatch(r"[0-9]+", parameters["limit"])
+                or int(parameters["limit"]) <= 0
+                or record["path"] != "/loki/api/v1/query_range"
+                or step is not None
+                or window["start"] > window["end"]):
+            raise ValueError("inconsistent logs command or parameters")
+        expected_sample = {"result_type": None if record["status"] == "unavailable" else "streams",
+                           "series_count": 0, "sample_count": 0, "unmodelled_count": 0,
+                           "discovery_items": None, "series": []}
+        if summary != expected_sample:
+            raise ValueError("logs must have an empty sample summary")
+        if record["status"] == "unavailable":
+            if record["log_summary"] is not None:
+                raise ValueError("failed logs have a summary")
+        else:
+            log_summary = fields(record["log_summary"], {
+                "stream_count": (int,), "entry_count": (int,), "limit_reached": (bool,),
+                "excerpts": (list,),
+            })
+            for excerpt in log_summary["excerpts"]:
+                fields(excerpt, {"timestamp_ns": string, "labels": (dict,), "metadata": (dict,),
+                                 "line": string, "truncated": (bool,)})
+            limit = int(parameters["limit"])
+            expected = summarize_logs(record["response"], limit)
+            if record["log_summary"] != expected:
+                raise ValueError("log summary differs from response")
+            if record["status"] != ("ok" if expected["entry_count"] else "empty"):
+                raise ValueError("log status differs from returned entries")
     link = record["presenter_link"]
     if link is not None:
         parsed = urlsplit(link)
@@ -725,6 +764,14 @@ def evidence_result(record: dict) -> str:
     """The summary in words, keeping unavailable, empty, zero and unmodelled data distinct."""
     if record["status"] == "unavailable":
         return "unavailable: " + plain(record["error"]["message"])
+    if record["command"] == "logs":
+        summary = record["log_summary"]
+        words = f"{summary['entry_count']} returned log entries in {summary['stream_count']} streams"
+        if summary["limit_reached"]:
+            words += "; limit reached: possibly incomplete"
+        if not summary["entry_count"]:
+            words += "; no data returned"
+        return words
     if record["status"] == "empty":
         return "no data"
     summary = record["sample_summary"]
@@ -809,11 +856,36 @@ def evidence_display(record: dict) -> list[dict]:
         "type": "text", "text": "Open in Grafana",
         "marks": [{"type": "link", "attrs": {"href": link}}],
     }
-    return [
-        {"type": "text", "text": plain(query), "marks": [{"type": "code"}]},
+    nodes = [
+        {"type": "text", "text": query if record["command"] == "logs" else plain(query),
+         "marks": [{"type": "code"}]},
         {"type": "text", "text": f" ({plain(context)}): {plain(evidence_result(record))} "},
         destination,
     ]
+    if record["command"] == "logs" and record["log_summary"] is not None:
+        for excerpt in record["log_summary"]["excerpts"]:
+            nodes.extend([
+                {"type": "text", "text": f" | timestamp_ns={excerpt['timestamp_ns']} "
+                 f"labels={compact(excerpt['labels'])} metadata={compact(excerpt['metadata'])} "},
+                ({"type": "text", "text": excerpt["line"], "marks": [{"type": "code"}]}
+                 if excerpt["line"] else {"type": "text", "text": "[empty log line]"}),
+            ])
+            if excerpt["truncated"]:
+                nodes.append({"type": "text", "text": " [truncated to 600 characters]"})
+    return nodes
+
+
+def _quoted_evidence(comment: dict) -> str:
+    """Literal JSON in one shell argument; JSON escapes decode only inside Jira.
+
+    Encoding apostrophes keeps the shell's single quote intact. JSON encodes line
+    breaks, controls and backslashes; dollars and backticks are encoded as well,
+    so evidence cannot resemble shell substitution in the printed command.
+    """
+    encoded = json.dumps(comment, ensure_ascii=True, separators=(",", ":"))
+    for character, escape in (("'", "\\u0027"), ("$", "\\u0024"), ("`", "\\u0060")):
+        encoded = encoded.replace(character, escape)
+    return f"'{encoded}'"
 
 
 def investigate(key: str, observation: str, interpretation: str, unknown: str, path: Path) -> list[str]:
@@ -843,7 +915,9 @@ def investigate(key: str, observation: str, interpretation: str, unknown: str, p
         *evidence,
     ])
     comment = {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": nodes}]}
-    return [f"jira-as collaborate comment add {key} -b {quoted(compact(comment))} --format adf"]
+    body = (_quoted_evidence(comment) if any(record["command"] == "logs" for record in records)
+            else quoted(compact(comment)))
+    return [f"jira-as collaborate comment add {key} -b {body} --format adf"]
 
 
 # --- the command line ---

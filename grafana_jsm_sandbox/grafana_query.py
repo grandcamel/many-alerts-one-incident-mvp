@@ -26,6 +26,7 @@ from grafana_jsm_sandbox.investigation_contract import (
     EVIDENCE_FILENAME,
     EVIDENCE_SCHEMA_VERSION,
 )
+from grafana_jsm_sandbox.loki_evidence import summarize_logs
 
 TIMEOUT_SECONDS = 10
 UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -57,9 +58,9 @@ class _Parser(argparse.ArgumentParser):
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="grafana-query", allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("instant", "range", "get"):
+    for name in ("instant", "range", "get", "logs"):
         command = commands.add_parser(name, allow_abbrev=False)
-        command.add_argument("--datasource", default="prometheus")
+        command.add_argument("--datasource", default="loki" if name == "logs" else "prometheus")
         if name == "get":
             command.add_argument("--path", required=True)
             command.add_argument("--param", action="append", default=[])
@@ -70,7 +71,11 @@ def _parser() -> argparse.ArgumentParser:
             else:
                 command.add_argument("--start", default="now-10m")
                 command.add_argument("--end", default="now")
-                command.add_argument("--step", default="10s")
+                if name == "logs":
+                    command.add_argument("--limit", default="100")
+                    command.add_argument("--direction", default="backward")
+                else:
+                    command.add_argument("--step", default="10s")
     return parser
 
 
@@ -166,6 +171,16 @@ def _utc(seconds: Decimal) -> str:
     ).replace("+00:00", "Z")
 
 
+def _loki_bound(seconds: Decimal) -> tuple[Decimal, str]:
+    """Normalize a Loki request and Explore bound to the recorded UTC milliseconds."""
+    bound = _utc(seconds)
+    delta = datetime.fromisoformat(bound.replace("Z", "+00:00")) - datetime(
+        1970, 1, 1, tzinfo=UTC
+    )
+    milliseconds = delta.days * 86_400_000 + delta.seconds * 1000 + delta.microseconds // 1000
+    return Decimal(milliseconds) / 1000, bound
+
+
 def _invocation(args, now: Decimal):
     """The exact parameter order, and resolved bounds for evidence and links."""
     if not args.datasource:
@@ -175,6 +190,24 @@ def _invocation(args, now: Decimal):
         start = end = _time(args.time, "--time", now)
         path = "/api/v1/query"
         parameters = [("query", args.query), ("time", _decimal(start))]
+    elif args.command == "logs":
+        start = _time(args.start, "--start", now)
+        end = _time(args.end, "--end", now)
+        if start > end:
+            raise QueryError("--start must be <= --end")
+        if not re.fullmatch(r"[0-9]+", args.limit) or int(args.limit) <= 0:
+            raise QueryError("--limit must be a positive integer")
+        if args.direction not in {"forward", "backward"}:
+            raise QueryError("--direction must be forward or backward")
+        # Resolve to the evidence's millisecond UTC window before constructing
+        # the Explore bounds. Loki interprets integer times as nanoseconds.
+        start, start_bound = _loki_bound(start)
+        end, end_bound = _loki_bound(end)
+        path = "/loki/api/v1/query_range"
+        parameters = [
+            ("query", args.query), ("start", start_bound), ("end", end_bound),
+            ("limit", str(int(args.limit))), ("direction", args.direction),
+        ]
     elif args.command == "range":
         start = _time(args.start, "--start", now)
         end = _time(args.end, "--end", now)
@@ -202,7 +235,10 @@ def _invocation(args, now: Decimal):
                 raise QueryError("--param must be NAME=VALUE")
             if name in {"start", "end", "time"}:
                 resolved = _time(value, "--param " + name, now)
-                value = _decimal(resolved)
+                if path.startswith("/loki/"):
+                    resolved, value = _loki_bound(resolved)
+                else:
+                    value = _decimal(resolved)
                 if name in {"start", "time"}:
                     start = resolved
                 if name in {"end", "time"}:
@@ -398,8 +434,12 @@ def _presenter(base, args, proxy, parameters, start, end):
         return base + quote(proxy, safe="/%") + ("?" + urlencode(parameters) if parameters else "")
     panes = {"A": {"datasource": args.datasource, "queries": [{
         "refId": "A", "expr": args.query, "instant": args.command == "instant",
-        "range": args.command == "range",
+        "range": args.command in {"range", "logs"},
     }], "range": {"from": str(int(start * 1000)), "to": str(int(end * 1000))}}}
+    if args.command == "logs":
+        panes["A"]["queries"][0].update(
+            queryType="range", direction=args.direction, maxLines=int(args.limit)
+        )
     return base + "/explore?schemaVersion=1&panes=" + quote(_json(panes), safe="")
 
 
@@ -417,6 +457,11 @@ def _display(record, outcome: str, writable: bool) -> list[str]:
         )
     if record["status"] == "unavailable":
         detail = "unavailable"
+    elif record["command"] == "logs":
+        logs = record["log_summary"]
+        detail = "possibly incomplete (limit reached)" if logs["limit_reached"] else "returned data"
+        if not logs["entry_count"]:
+            detail = "no data"
     elif summary["discovery_items"] is not None:
         detail = f'discovery items={summary["discovery_items"]}'
     elif not summary["sample_count"]:
@@ -435,11 +480,18 @@ def _display(record, outcome: str, writable: bool) -> list[str]:
             detail += f'; +{summary["series_count"] - 1} more series'
         if summary["unmodelled_count"]:
             detail += f'; unmodelled samples={summary["unmodelled_count"]}'
+    counts = (
+        f'logs: {record["log_summary"]["stream_count"]} streams, '
+        f'{record["log_summary"]["entry_count"]} returned entries'
+        if record["command"] == "logs" and record["log_summary"] is not None else
+        "logs: unavailable" if record["command"] == "logs" else
+        f'samples: {summary["series_count"]} series, {summary["sample_count"]} samples'
+    )
     lines = [
         "grafana-query: " + outcome,
         "query: " + query,
         f'datasource: {record["datasource"]} | window: {bounds} | step: {step}',
-        f'samples: {summary["series_count"]} series, {summary["sample_count"]} samples | {detail}',
+        counts + " | " + detail,
         (f'evidence: {EVIDENCE_FILENAME if writable else "unavailable"} | '
          f'presenter: {record["presenter_link"] or "none"}'),
     ]
@@ -470,6 +522,8 @@ def main(argv: list[str] | None = None) -> int:
         "presenter_link": _presenter(presenter, args, proxy, parameters, start, end),
         "response": None,
     }
+    if args.command == "logs":
+        record["log_summary"] = None
 
     def unavailable(kind, message, status=None):
         record["error"] = {"kind": kind, "message": message, "http_status": status}
@@ -498,7 +552,11 @@ def main(argv: list[str] | None = None) -> int:
                 if isinstance(response, dict) and response.get("status") == "error":
                     outcome = unavailable("query_error", "query error")
                 else:
-                    if args.command == "get":
+                    if args.command == "logs":
+                        record["log_summary"] = summarize_logs(response, int(args.limit))
+                        record["sample_summary"]["result_type"] = "streams"
+                        outcome = "ok" if record["log_summary"]["entry_count"] else "no data"
+                    elif args.command == "get":
                         record["sample_summary"], outcome = _get_summary(response)
                     else:
                         record["sample_summary"], outcome = _summarize(response)
