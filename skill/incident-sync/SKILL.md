@@ -189,6 +189,9 @@ Choose your expressions and any follow-ups from the evidence. There is no requir
 expression, expected result or diagnosis. The datasource defaults to `prometheus`.
 The current rules use `http_server_duration_milliseconds_count` with `service_name`
 and `http_status_code` labels; `service_name="rolldice"` selects the demo service.
+For an optional latency Alert, duration `_sum` and `_count` series can provide
+mean observed request duration. Verify emitted metric names, units and labels
+from the Alert and returned metrics before choosing that query.
 The rule called a health probe also counts completed requests, so another view of
 that metric is context, not independent reachability evidence. `checkout-outage`
 is a demonstration group label, not proof of a checkout service.
@@ -199,6 +202,15 @@ uncertain. OTLP configuration is not live evidence: only returned records establ
 what logs were observed. The routine rolldice messages have warning severity, so
 a warning label alone does not establish an error or a cause.
 
+When the metric and log evidence makes latency relevant, choose a TraceQL search
+in Tempo and, when useful, fetch a relevant trace ID actually returned by search.
+Start with one targeted search and one relevant trace; add follow-ups only to
+answer a specific missing point within the remaining Run time. No fixed query or
+diagnosis is required. Correlate observed services, trace IDs and time intervals
+with the other evidence. A long span supports an observation about its interval;
+it does not by itself establish a root cause. Do not sum overlapping span
+durations as request latency or claim a critical path from these summaries.
+
 ```bash
 grafana-query instant --query='<expression>'
 grafana-query range --query='<expression>'
@@ -207,6 +219,8 @@ grafana-query get --path=/api/v1/series --param='match[]=<selector>'
 grafana-query get --path=/api/v1/metadata
 grafana-query logs --query='<LogQL>'
 grafana-query get --datasource=loki --path=/loki/api/v1/labels
+grafana-query traces --query='<TraceQL>'
+grafana-query trace --id='<returned trace ID>'
 ```
 
 Flags follow the subcommand. `--datasource <uid>` selects another datasource.
@@ -220,6 +234,12 @@ minus signs stay in the value, for example `--query='-up'`.
 Logs defaults to `loki`; its `--start` and `--end` default to `now-10m` and `now`.
 Its `--limit` defaults to `100` returned entries and accepts a positive integer;
 `--direction` defaults to `backward` and also accepts `forward`. Logs has no step.
+Traces defaults to `tempo`, `now-10m` through `now`, and `--limit=20`; its bounds
+are normalized to whole Unix seconds and it has no step or direction. `trace`
+defaults to `tempo` and looks up the supplied nonzero hex trace ID without an API
+time window. IDs are displayed as 32 lowercase hex characters. A fetched trace's
+Explore range covers its observed span envelope for navigation, not an API filter
+or proof that all spans were retrieved.
 Use those flags to inspect a time window and direction chosen from the evidence.
 Query arguments use plain single quotes; preserve double quotes and
 backslashes in the expression inside those quotes. If an expression needs an
@@ -260,6 +280,31 @@ nanosecond timestamps, labels and metadata, the returned count, and any limit
 warning. An excerpt longer than 600 characters is explicitly marked truncated;
 full original lines remain in the evidence file. The printed ADF argument may
 contain JSON escapes that preserve literal log punctuation and line breaks.
+Hidden control characters other than LF, and Unicode line/paragraph separators,
+in log excerpts, queries, labels and
+metadata are displayed as printable `[U+XXXX]` notation, with an explicit
+`[control characters shown as U+XXXX]` notice. This display transformation avoids
+hidden characters in the command; the evidence file retains the original text.
+Literal Unicode escape notation such as `\u001b` is displayed as `[U+005C]u001b`,
+with a separate `[Unicode escape notation shown with U+005C]` notice. The changed
+backslash is printable source text, not a hidden control. This conservative
+display rule prevents escape expansion in a local normalization replay; live
+normalization of double-escaped literals has not been confirmed. Ordinary
+backslashes, LF line breaks and emoji joiners retain their spelling.
+The printed ADF argument uses shell quoting that may include adjacent quoted
+segments to preserve apostrophes. Copy that complete command exactly as printed;
+do not decode JSON escapes or rebuild its quotes. This exception applies to the
+builder's investigation comment, whose literal evidence is already serialized.
+For Tempo, the builder shows the three longest returned search results and up to
+five longest observed spans from a fetched trace, with IDs, parents, services,
+statuses and durations. These are selected from returned data, not the globally
+slowest traces. It reports backend partial status, missing parents, reached limits
+and available job counters; even backend complete or all jobs completed does not
+establish complete telemetry. The observed trace envelope is max(end)-min(start),
+not a sum of span durations. Empty search means no returned matches for that
+query and window; empty fetch means no returned spans, not a healthy application.
+Trace source text uses the same printable control/separator display and exact
+shell serialization as log evidence; full raw traces remain in the evidence file.
 <!-- investigation:end -->
 ## Step 2b — update the Incident
 

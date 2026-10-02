@@ -62,10 +62,13 @@ chat.** Claude never reads `.env`; the repo's settings deny it.
 
 For the Loki log-query extension, evidence excerpts and presenter rehearsal, see
 [Loki investigation](loki-investigation.md). It uses the same opt-in and create-only timing.
+For the optional latency Alert and trace/span evidence, see
+[slow-response investigation](slow-response-investigation.md), including its explicit reset.
 
 Investigation is opt-in and secondary to the lifecycle. Only the Run that creates the Incident
 investigates, after the create and opening comment succeed. It chooses current read-only PromQL,
-LogQL and discovery GETs, then posts one evidence comment on that same confirmed Incident.
+LogQL, TraceQL, trace-ID lookups and discovery GETs, then posts one evidence comment on that
+same confirmed Incident.
 Updates, repeats, related-alert updates and resolved Notifications do not investigate. It never
 creates an Incident just to hold evidence.
 

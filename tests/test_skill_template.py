@@ -779,6 +779,22 @@ def test_enabled_finish_preserves_lifecycle_success_despite_investigation_failur
     assert "lifecycle failure still starts `failed: ` and does not investigate" in finish
 
 
+def test_enabled_tempo_guidance_uses_observed_traces_and_keeps_diagnosis_open():
+    skill = render(TEMPLATE, SESSIONED, investigation_enabled=True)
+    create = " ".join(section(skill, "Step 2a").split())
+    for fact in ("grafana-query traces --query=", "grafana-query trace --id=",
+                 "metric and log evidence makes latency relevant", "actually returned by search",
+                 "one targeted search and one relevant trace", "without an API time window",
+                 "whole Unix seconds", "three longest returned", "five longest observed spans",
+                 "backend partial status", "missing parents", "telemetry", "max(end)-min(start)",
+                 "Do not sum overlapping span durations", "adjacent quoted segments"):
+        assert fact in create
+    for leak in ("slow_ms", "rolldice.wait", "sides=six", "500ms"):
+        assert leak not in skill
+    for heading in ("Step 2b", "Step 2c"):
+        assert "grafana-query traces" not in section(skill, heading)
+
+
 def test_disabled_rendering_preserves_baseline_except_close_accounting():
     import subprocess
 

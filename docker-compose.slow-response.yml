@@ -1,0 +1,19 @@
+# Optional latency take. Requires Compose >=2.24.4 for !override.
+# Install before healthy warmup; injection/reset recreates traffic only.
+# Apply a proxy/CA overlay after this one so its additional mounts survive.
+services:
+  lgtm:
+    # Replace the read-only directory mount with individual files; a nested
+    # optional mount beneath that directory cannot be created reliably.
+    volumes: !override
+      - ./grafana/provisioning/alerting/alert-rule.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/alert-rule.yaml:ro
+      - ./grafana/provisioning/alerting/contact-point.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/contact-point.yaml:ro
+      - ./grafana/provisioning/alerting/notification-policy.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/notification-policy.yaml:ro
+      - ${SLOW_RESPONSE_RULES_FILE:-./grafana/optional/slow-response.yaml}:/otel-lgtm/grafana/conf/provisioning/alerting/slow-response.yaml:ro
+  traffic:
+    environment:
+      ROLLDICE_SLOW_MS: ${ROLLDICE_SLOW_MS:-0}
+    command:
+      - sh
+      - -c
+      - while true; do wget -qO- "http://rolldice:8082/rolldice?player=demo&sides=$${ROLLDICE_SIDES}&slow_ms=$${ROLLDICE_SLOW_MS}"; echo; sleep 1; done

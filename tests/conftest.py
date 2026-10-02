@@ -74,7 +74,10 @@ BASIC_DEMO_TESTS = frozenset(
         "test_run_spawner.py",
         "test_setup_skill.py",
         "test_skill_template.py",
+        "test_slow_response.py",
         "test_startup.py",
+        "test_tempo_payload.py",
+        "test_tempo_query.py",
         "test_verify.py",
         "test_verify_mvp.py",
     }

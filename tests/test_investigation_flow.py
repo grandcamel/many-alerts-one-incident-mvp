@@ -38,6 +38,7 @@ from tests.conftest import FIXTURES, REPOSITORY, post_notification, wait_for_log
 from tests.grafana_upstream import FakeGrafana
 from tests.test_fake_jira import EMAIL, GROUP, KEY, SESSION, TOKEN, project_for
 from tests.test_fake_jira import jira_as_cli as _jira_as_cli
+from tests.test_tempo_query import TRACE_ID, fetched_trace
 
 jira_as_cli = _jira_as_cli
 
@@ -45,12 +46,13 @@ VIEWER_TOKEN = "private-viewer-token-for-loopback-only"
 PRESENTER_URL = "http://presenter.example.invalid:3300"
 QUERY = 'sum(rate(http_server_duration_milliseconds_count{service_name="rolldice"}[5m]))'
 LOG_QUERY = '{service_name="rolldice"}'
-LOG_LINE = 'demo is rolling the dice: 4'
+LOG_LINE = "demo's roll: 4"
+TRACE_QUERY = '{ resource.service.name = "rolldice" && span:duration > 250ms }'
 
 
 def scripted_run(
     jira_as: str, status_open: str, status_in_progress: str, status_done: str,
-    with_logs: bool = False,
+    with_logs: bool = False, with_traces: bool = False,
 ) -> None:
     """The child follows the lifecycle branches; it makes no model judgment."""
     working = Path.cwd()
@@ -165,6 +167,22 @@ def scripted_run(
                     ])
                 tool("grafana-query logs --query='" + LOG_QUERY + "'",
                      output.getvalue(), log_status != 0)
+            if with_traces:
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    trace_status = grafana_query.main([
+                        "traces", "--query=" + TRACE_QUERY, "--start=1000", "--end=1001",
+                    ])
+                tool("grafana-query traces --query='" + TRACE_QUERY + "'",
+                     output.getvalue(), trace_status != 0)
+                found = json.loads(output.getvalue().splitlines()[-1])
+                if trace_status == 0 and found["trace_summary"]["trace_count"]:
+                    trace_id = found["trace_summary"]["excerpts"][0]["trace_id"]
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        fetch_status = grafana_query.main(["trace", "--id=" + trace_id])
+                    tool("grafana-query trace --id=" + trace_id,
+                         output.getvalue(), fetch_status != 0)
             [comment] = printed(
                 "investigate",
                 "--key",
@@ -248,6 +266,7 @@ def scripted_run(
 @pytest.mark.parametrize("case", [
     "enabled", "disabled", "unreachable", "401", "timeout",
     "loki-success", "loki-empty", "loki-unavailable",
+    "tempo-success", "tempo-empty", "tempo-unavailable",
 ])
 def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
     case, workflow, jira_as_cli, tmp_path, caplog, monkeypatch
@@ -258,6 +277,7 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
     project = project_for(workflow, fake)
     runs = tmp_path / "runs"
     enabled = case != "disabled"
+    with_logs = case.startswith("loki-") or case == "tempo-success"
     upstream = FakeGrafana()
     upstream.start()
     try:
@@ -278,7 +298,7 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
             upstream.responses.append(
                 (200, json.dumps(response).encode(), 11 if case == "timeout" else 0)
             )
-        if case.startswith("loki-"):
+        if with_logs:
             if case == "loki-unavailable":
                 upstream.responses.append((503, b"upstream unavailable", 0))
             else:
@@ -289,6 +309,16 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
                 upstream.responses.append((200, json.dumps({
                     "status": "success", "data": {"resultType": "streams", "result": streams},
                 }).encode(), 0))
+        if case.startswith("tempo-"):
+            found = [] if case == "tempo-empty" else [{
+                "traceID": TRACE_ID, "rootServiceName": "rolldice",
+                "rootTraceName": "GET /rolldice", "durationMs": 800,
+            }]
+            upstream.responses.append((200, json.dumps({"traces": found}).encode(), 0))
+            if case == "tempo-success":
+                upstream.responses.append((200, json.dumps(fetched_trace()).encode(), 0))
+            elif case == "tempo-unavailable":
+                upstream.responses.append((503, b"upstream unavailable", 0))
         settings = InvestigationSettings.from_environment(
             {
                 "DEMO_INVESTIGATION_ENABLED": "true" if enabled else "false",
@@ -316,7 +346,8 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
             "from tests.test_investigation_flow import scripted_run; "
             f"scripted_run({jira_as_cli!r}, {project.status_open!r}, "
             f"{project.status_in_progress!r}, {project.status_done!r}, "
-            f"with_logs={case.startswith('loki-')!r})"
+            f"with_logs={with_logs!r}, "
+            f"with_traces={case.startswith('tempo-')!r})"
         )
         with Server(fake) as served:
             forwarder = Forwarder(JiraCredential(served.url, EMAIL, TOKEN))
@@ -452,6 +483,30 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
                 assert log_record["status"] == "unavailable"
                 assert "HTTP 503" in marked[0]
             assert "investigation recorded" in finishes[0]  # metric evidence remains usable
+        elif case.startswith("tempo-"):
+            if case == "tempo-success":
+                log_record, *log_records = log_records
+                assert log_record["command"] == "logs" and log_record["status"] == "ok"
+                assert LOG_LINE in marked[0]
+            search_record, *fetched = log_records
+            assert search_record["command"] == "traces"
+            assert search_record["query"] == TRACE_QUERY
+            if case == "tempo-empty":
+                assert search_record["status"] == "empty" and fetched == []
+                assert "no data" in marked[0].lower() or "no traces" in marked[0].lower()
+            else:
+                assert search_record["status"] == "ok"
+                assert TRACE_ID in marked[0]
+                [trace_record] = fetched
+                assert trace_record["command"] == "trace"
+                if case == "tempo-success":
+                    assert trace_record["status"] == "ok"
+                    assert "rolldice.wait" in marked[0]
+                    assert "500000000" in marked[0]
+                else:
+                    assert trace_record["status"] == "unavailable"
+                    assert "HTTP 503" in marked[0]
+            assert "investigation recorded" in finishes[0]
         else:
             assert log_records == []
     else:
@@ -461,7 +516,10 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
             json.loads((directory / "run-details.json").read_text())["grafana_variables"] == []
             for directory in directories
         )
-    assert len(upstream.received) == int(enabled and case != "unreachable") + int(case.startswith("loki-"))
+    trace_requests = (1 if case == "tempo-empty" else 2) if case.startswith("tempo-") else 0
+    assert len(upstream.received) == (
+        int(enabled and case != "unreachable") + int(with_logs) + trace_requests
+    )
     for index, request in enumerate(upstream.received):
         assert request.method == "GET" and request.body == b""
         assert request.headers["Authorization"] == "Bearer " + VIEWER_TOKEN
@@ -469,6 +527,16 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
         if index == 0:
             assert parsed.path == "/api/datasources/proxy/uid/prometheus/api/v1/query"
             assert parse_qs(parsed.query)["query"] == [QUERY]
+        elif with_logs and index == 1:
+            assert parsed.path == "/api/datasources/proxy/uid/loki/loki/api/v1/query_range"
+            assert parse_qs(parsed.query)["query"] == [LOG_QUERY]
+        elif case.startswith("tempo-"):
+            if index == 1 + int(with_logs):
+                assert parsed.path == "/api/datasources/proxy/uid/tempo/api/search"
+                assert parse_qs(parsed.query)["q"] == [TRACE_QUERY]
+            else:
+                assert parsed.path == "/api/datasources/proxy/uid/tempo/api/v2/traces/" + TRACE_ID
+                assert parsed.query == ""
         else:
             assert parsed.path == "/api/datasources/proxy/uid/loki/loki/api/v1/query_range"
             assert parse_qs(parsed.query)["query"] == [LOG_QUERY]

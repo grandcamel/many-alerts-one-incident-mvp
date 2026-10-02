@@ -195,11 +195,15 @@ the tokens and admin requests only you can give, and asking before anything writ
 ## Optional Grafana investigation
 
 Investigation is disabled by default. Only the Run that creates the Incident investigates,
-after the create and opening comment succeed, using current read-only PromQL and discovery
-GETs of its choosing through `grafana-query`. It adds one evidence comment to that same
+after the create and opening comment succeed, using current read-only metric, log and trace
+queries of its choosing through `grafana-query`. It adds one evidence comment to that same
 confirmed Incident. Updates, repeats, related-alert updates and resolved Notifications do not
 investigate; no Incident is created just to hold evidence. Query, builder and post failures
 leave a successful lifecycle Finish starting `ok: `.
+
+The optional [Loki take](docs/loki-investigation.md) adds application log evidence;
+the [slow-response take](docs/slow-response-investigation.md) adds a latency Alert
+and an observed child span in Tempo. Both retain the existing demo as a fallback.
 
 The four commented settings in `.env.example` are `DEMO_INVESTIGATION_ENABLED`,
 `DEMO_GRAFANA_URL`, `DEMO_GRAFANA_PRESENTER_URL` and `DEMO_GRAFANA_VIEWER_TOKEN`. Follow the

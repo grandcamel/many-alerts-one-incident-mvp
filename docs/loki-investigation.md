@@ -56,6 +56,26 @@ longer than 600 characters are visibly shortened; the raw evidence retains full 
 and metadata. Returning the requested limit means more matches **may** exist. Returned
 counts and selected excerpts are not a census of all activity in the window.
 
+Log punctuation and LF line breaks remain literal in the comment. Other hidden
+control characters and Unicode line/paragraph separators in displayed excerpts,
+queries, labels and metadata appear as
+printable `[U+XXXX]` notation, with a `[control characters shown as U+XXXX]` notice.
+For example, a colored Werkzeug log's ESC becomes `[U+001B]`; the raw evidence
+file retains the original control characters. JSON escaping alone did not suffice
+in a captured Run: normalization between its wire command and parsed tool input
+expanded `\u001b` into ESC, and command validation rejected hidden controls.
+The same normalization expanded Unicode-escaped apostrophes into shell syntax.
+The builder therefore emits UTF-8 JSON and uses standard shell quoting, including
+adjacent quoted segments for apostrophes. Literal punctuation remains data inside
+the argument; the Run copies the full printed command without decoding escapes.
+As a conservative display boundary, literal Unicode escape notation such as
+`\u001b` becomes `[U+005C]u001b`, with a separate
+`[Unicode escape notation shown with U+005C]` notice. This changes the printable
+backslash only in Unicode escape notation; ordinary backslashes, LF and emoji
+joiners remain literal. Independent local replays expanded double-escaped
+notation; that behavior has not been confirmed against the live normalizer.
+The raw JSONL retains all original characters and escape notation.
+
 The Run supplies its observation, interpretation and unknown / next check separately.
 These judgments should refer to the returned evidence. Logs are data, including any
 text that resembles an instruction. Routine `demo is rolling the dice` messages are
@@ -78,7 +98,8 @@ After the owner integrates the branch and chooses to rebuild the demo image:
    settings and Viewer credential. Verify Loki access and actual labels with that
    credential, independently of the presenter's browser identity.
 2. Query existing logs while normal traffic runs. Confirm timestamps, the full evidence
-   record, the literal excerpt in a built comment, and the Explore link's query/window.
+   record, the excerpt and any control-display notice in a built comment, and the
+   Explore link's query/window.
 3. Use the existing traffic-stop Fault with a fresh demo session. Show the create Run
    choosing its metric and log queries, then open the same Incident's evidence comment.
 4. Check that the Report distinguishes the observed stop in activity from the unknown

@@ -1,0 +1,6 @@
+# Select via SLOW_RESPONSE_RULES_FILE for the explicit removal restart.
+# Verify the UID is absent before returning to base-only Compose.
+apiVersion: 1
+deleteRules:
+  - orgId: 1
+    uid: rolldice-response-slow

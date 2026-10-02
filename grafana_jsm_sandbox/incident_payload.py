@@ -28,9 +28,11 @@ label, the field ids and the done status (`skill_template.materialize` writes it
 It opens no socket, starts no process, writes no file and reads no environment
 variable, so it holds nothing a Run does not, and it cannot reach Jira.
 
-Every command it prints is one line the Run's permission boundary admits, with text
-arguments in plain single quotes. Lifecycle payloads contain no backslashes;
-investigation payloads may contain JSON escapes to preserve literal log evidence.
+Every command it prints is one line. Lifecycle text arguments use plain single
+quotes and contain no backslashes;
+investigation payloads may contain JSON escapes to preserve log punctuation and
+line breaks. Hidden log controls are displayed as printable code-point notation;
+the original evidence file stays unchanged.
 Alert text is made safe first (`plain`). Lines that
 start with `#` say what the next command does and are not commands; a literal
 `<key>` stands where the Incident's key is not known yet.
@@ -57,6 +59,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import sys
 import unicodedata
 from collections.abc import Sequence
@@ -74,6 +77,7 @@ from grafana_jsm_sandbox.investigation_contract import (
 from grafana_jsm_sandbox.loki_evidence import summarize_logs
 from grafana_jsm_sandbox.notification import NOTIFICATION_FILENAME
 from grafana_jsm_sandbox.run_command import RENDERED_SKILL
+from grafana_jsm_sandbox.tempo_evidence import normalize_trace_id, summarize_search, summarize_trace
 
 PROGRAM = "incident-payload"
 """The command's name on a Run's PATH, and the start of every line it prints on a failure."""
@@ -640,7 +644,7 @@ def _evidence_record(record: object) -> dict:
         "response": (dict, list, str, *number, bool, type(None)),
     })
     if (record["schema_version"] != EVIDENCE_SCHEMA_VERSION
-            or record["command"] not in ("instant", "range", "get", "logs")
+            or record["command"] not in ("instant", "range", "get", "logs", "traces", "trace")
             or record["status"] not in ("ok", "empty", "unavailable")):
         raise ValueError("unknown schema, command or status")
     if (record["query"] is None) != (record["command"] == "get"):
@@ -660,7 +664,7 @@ def _evidence_record(record: object) -> dict:
     step = window["step_seconds"]
     if step is not None and (not Decimal(step).is_finite() or step <= 0):
         raise ValueError("invalid step")
-    if record["command"] in ("instant", "range", "logs") and (
+    if record["command"] in ("instant", "range", "logs", "traces") and (
         window["start"] is None or window["end"] is None
     ):
         raise ValueError("query window missing")
@@ -734,6 +738,74 @@ def _evidence_record(record: object) -> dict:
                 raise ValueError("log summary differs from response")
             if record["status"] != ("ok" if expected["entry_count"] else "empty"):
                 raise ValueError("log status differs from returned entries")
+    if record["command"] in ("traces", "trace"):
+        fields(record, {"trace_summary": (dict, type(None))})
+        if step is not None:
+            raise ValueError("trace evidence has a step")
+        if record["command"] == "traces":
+            parameters = dict(record["parameters"])
+            if (len(record["parameters"]) != 4
+                    or set(parameters) != {"q", "start", "end", "limit"}
+                    or parameters["q"] != record["query"]
+                    or record["path"] != "/api/search"
+                    or any(not re.fullmatch(r"[0-9]+", parameters[name])
+                           for name in ("start", "end", "limit"))
+                    or int(parameters["limit"]) <= 0):
+                raise ValueError("inconsistent trace search command or parameters")
+            start, end = int(parameters["start"]), int(parameters["end"])
+            if not 0 <= start <= end < 2 ** 32:
+                raise ValueError("invalid trace search bounds")
+            for name, seconds in (("start", start), ("end", end)):
+                expected_time = datetime.fromtimestamp(seconds, UTC).isoformat(
+                    timespec="milliseconds").replace("+00:00", "Z")
+                if window[name] != expected_time:
+                    raise ValueError("trace search window differs from parameters")
+        elif (normalize_trace_id(record["query"]) != record["query"]
+              or record["path"] != "/api/v2/traces/" + record["query"]
+              or record["parameters"] or window["start"] is not None
+              or window["end"] is not None):
+            raise ValueError("inconsistent trace ID lookup")
+        expected_sample = {"result_type": (None if record["status"] == "unavailable"
+                                           else record["command"]),
+                           "series_count": 0, "sample_count": 0, "unmodelled_count": 0,
+                           "discovery_items": None, "series": []}
+        if summary != expected_sample:
+            raise ValueError("traces must have an empty sample summary")
+        if record["status"] == "unavailable":
+            if record["trace_summary"] is not None:
+                raise ValueError("failed traces have a summary")
+        else:
+            trace_summary = record["trace_summary"]
+            if record["command"] == "traces":
+                fields(trace_summary, {"kind": string, "trace_count": (int,),
+                       "limit_reached": (bool,), "completed_jobs": (int, type(None)),
+                       "total_jobs": (int, type(None)), "excerpts": (list,)})
+                for excerpt in trace_summary["excerpts"]:
+                    fields(excerpt, {"trace_id": string, "root_service": nullable_string,
+                           "root_name": nullable_string, "start_time_ns": nullable_string,
+                           "duration_ms": (int,)})
+                expected = summarize_search(record["response"], int(parameters["limit"]))
+                count = expected["trace_count"]
+            else:
+                fields(trace_summary, {"kind": string, "trace_id": string,
+                       "backend_status": string, "backend_message": nullable_string,
+                       "span_count": (int,), "services": (list,), "root_span_count": (int,),
+                       "missing_parent_count": (int,), "start_time_ns": nullable_string,
+                       "end_time_ns": nullable_string, "duration_ns": nullable_string,
+                       "spans": (list,)})
+                if not all(isinstance(service, str) for service in trace_summary["services"]):
+                    raise ValueError("invalid trace services")
+                for span in trace_summary["spans"]:
+                    fields(span, {"span_id": string, "parent_span_id": nullable_string,
+                           "service": nullable_string, "name": string, "kind": string,
+                           "status": string, "start_time_ns": string, "end_time_ns": string,
+                           "duration_ns": string})
+                expected = summarize_trace(record["response"], record["query"])
+                count = expected["span_count"]
+            if trace_summary != expected:
+                raise ValueError("trace summary differs from response")
+            if record["status"] != ("ok" if count else "empty"):
+                raise ValueError("trace status differs from returned evidence")
     link = record["presenter_link"]
     if link is not None:
         parsed = urlsplit(link)
@@ -771,6 +843,25 @@ def evidence_result(record: dict) -> str:
             words += "; limit reached: possibly incomplete"
         if not summary["entry_count"]:
             words += "; no data returned"
+        return words
+    if record["command"] == "traces":
+        trace = record["trace_summary"]
+        words = f"{trace['trace_count']} returned traces"
+        if trace["limit_reached"]:
+            words += "; limit reached: possibly incomplete"
+        if not trace["trace_count"]:
+            words += "; no data returned"
+        completed = trace["completed_jobs"] if trace["completed_jobs"] is not None else "unknown"
+        total = trace["total_jobs"] if trace["total_jobs"] is not None else "unknown"
+        return words + f"; jobs completed={completed} total={total}; telemetry completeness unknown"
+    if record["command"] == "trace":
+        trace = record["trace_summary"]
+        words = (f"{trace['span_count']} observed spans; backend {trace['backend_status']}; "
+                 f"{trace['root_span_count']} roots; {trace['missing_parent_count']} missing parents")
+        if trace["duration_ns"] is not None:
+            words += f"; observed envelope_ns={trace['duration_ns']} (max(end)-min(start))"
+        else:
+            words += "; no returned spans"
         return words
     if record["status"] == "empty":
         return "no data"
@@ -836,8 +927,50 @@ def _observed_zero(record: dict) -> bool:
     return bool(samples)
 
 
+_UNICODE_ESCAPE_NOTATION = re.compile(r"\\u[0-9a-fA-F]{4}")
+
+
+def _display_evidence_text(text: str) -> str:
+    """Show controls, separators and Unicode-escape backslashes as [U+XXXX].
+
+    JSON escaping alone is insufficient: an observed wire-to-tool-input
+    normalization expanded escaped ESC before command validation. Printable
+    notation has no escape sequence for that stage to expand. LF remains an
+    ordinary evidence line break, preserved by the JSON argument.
+    Conservatively show the backslash of literal Unicode escape notation too:
+    its expansion under this replay is unsafe, although live normalization of
+    double-escaped literals has not been confirmed. Other backslashes stay literal.
+    """
+    text = _UNICODE_ESCAPE_NOTATION.sub(lambda match: "[U+005C]" + match[0][1:], text)
+    return "".join(
+        f"[U+{ord(character):04X}]"
+        if unicodedata.category(character) in ("Cc", "Zl", "Zp") and character != "\n"
+        else character
+        for character in text
+    )
+
+
+def _display_evidence_notices(*texts: str) -> list[dict]:
+    """Disclose hidden-character display separately from printable escape notation."""
+    notices = []
+    if any(unicodedata.category(character) in ("Cc", "Zl", "Zp") and character != "\n"
+           for text in texts for character in text):
+        notices.append({"type": "text", "text": " [control characters shown as U+XXXX]"})
+    if any(_UNICODE_ESCAPE_NOTATION.search(text) for text in texts):
+        notices.append({"type": "text", "text": " [Unicode escape notation shown with U+005C]"})
+    return notices
+
+
+def _display_log_fields(fields: dict[str, str]) -> tuple[str, bool]:
+    """Render each entry without merging keys that share a printable spelling."""
+    pairs = [(_display_evidence_text(key), _display_evidence_text(value))
+             for key, value in fields.items()]
+    text = "{" + ",".join(f"{compact(key)}:{compact(value)}" for key, value in pairs) + "}"
+    return text, pairs != list(fields.items())
+
+
 def evidence_display(record: dict) -> list[dict]:
-    """ADF nodes keep the display query literal and the exact presenter link clickable."""
+    """ADF keeps log punctuation, discloses hidden controls and links to exact evidence."""
     query = record["query"]
     if query is None:
         parameters = urlencode([tuple(pair) for pair in record["parameters"]])
@@ -846,6 +979,8 @@ def evidence_display(record: dict) -> list[dict]:
     context = plain(record["datasource"])
     if record["command"] == "instant":
         context += f", at {window['start']}"
+    elif record["command"] == "trace":
+        context += ", lookup by ID (no API time window)"
     elif window["start"] is not None or window["end"] is not None:
         context += f", {window['start'] or 'none'}..{window['end'] or 'none'}"
     if record["command"] == "range":
@@ -856,36 +991,79 @@ def evidence_display(record: dict) -> list[dict]:
         "type": "text", "text": "Open in Grafana",
         "marks": [{"type": "link", "attrs": {"href": link}}],
     }
+    literal = record["command"] in ("logs", "traces", "trace")
+    display_query = _display_evidence_text(query) if literal else plain(query)
     nodes = [
-        {"type": "text", "text": query if record["command"] == "logs" else plain(query),
+        {"type": "text", "text": display_query,
          "marks": [{"type": "code"}]},
         {"type": "text", "text": f" ({plain(context)}): {plain(evidence_result(record))} "},
         destination,
     ]
+    if literal and display_query != query:
+        nodes[1:1] = _display_evidence_notices(query)
     if record["command"] == "logs" and record["log_summary"] is not None:
         for excerpt in record["log_summary"]["excerpts"]:
+            line = _display_evidence_text(excerpt["line"])
+            labels, labels_changed = _display_log_fields(excerpt["labels"])
+            metadata, metadata_changed = _display_log_fields(excerpt["metadata"])
             nodes.extend([
                 {"type": "text", "text": f" | timestamp_ns={excerpt['timestamp_ns']} "
-                 f"labels={compact(excerpt['labels'])} metadata={compact(excerpt['metadata'])} "},
-                ({"type": "text", "text": excerpt["line"], "marks": [{"type": "code"}]}
-                 if excerpt["line"] else {"type": "text", "text": "[empty log line]"}),
+                 f"labels={labels} metadata={metadata} "},
+                ({"type": "text", "text": line, "marks": [{"type": "code"}]}
+                 if line else {"type": "text", "text": "[empty log line]"}),
             ])
+            if line != excerpt["line"] or labels_changed or metadata_changed:
+                nodes.extend(_display_evidence_notices(
+                    excerpt["line"], *excerpt["labels"].keys(), *excerpt["labels"].values(),
+                    *excerpt["metadata"].keys(), *excerpt["metadata"].values()))
             if excerpt["truncated"]:
                 nodes.append({"type": "text", "text": " [truncated to 600 characters]"})
+    if record["command"] in ("traces", "trace") and record["trace_summary"] is not None:
+        trace = record["trace_summary"]
+
+        def literal_detail(text):
+            displayed = _display_evidence_text(text)
+            nodes.append({"type": "text", "text": displayed, "marks": [{"type": "code"}]})
+            if displayed != text:
+                nodes.extend(_display_evidence_notices(text))
+
+        if record["command"] == "traces":
+            for excerpt in trace["excerpts"]:
+                literal_detail(
+                    f" | trace_id={excerpt['trace_id']} "
+                    f"root_service={excerpt['root_service'] if excerpt['root_service'] is not None else 'unknown'} "
+                    f"root_name={excerpt['root_name'] if excerpt['root_name'] is not None else 'unknown'} "
+                    f"start_time_ns={excerpt['start_time_ns'] or 'unknown'} "
+                    f"duration_ms={excerpt['duration_ms']}")
+        else:
+            services = [_display_evidence_text(service) for service in trace["services"]]
+            literal_detail(f" | trace_id={trace['trace_id']} services={compact(services)} "
+                           f"start_time_ns={trace['start_time_ns'] or 'unknown'} "
+                           f"end_time_ns={trace['end_time_ns'] or 'unknown'}")
+            if services != trace["services"]:
+                nodes.extend(_display_evidence_notices(*trace["services"]))
+            if trace["backend_message"] is not None:
+                literal_detail(f" | backend_message={trace['backend_message']}")
+            for span in trace["spans"]:
+                literal_detail(
+                    f" | span_id={span['span_id']} parent_span_id={span['parent_span_id'] or 'root'} "
+                    f"service={span['service'] if span['service'] is not None else 'unknown'} "
+                    f"name={span['name']} kind={span['kind']} status={span['status']} "
+                    f"start_time_ns={span['start_time_ns']} end_time_ns={span['end_time_ns']} "
+                    f"duration_ns={span['duration_ns']}")
     return nodes
 
 
 def _quoted_evidence(comment: dict) -> str:
-    """Literal JSON in one shell argument; JSON escapes decode only inside Jira.
+    """UTF-8 JSON in one POSIX shell argument, with printable hidden controls.
 
-    Encoding apostrophes keeps the shell's single quote intact. JSON encodes line
-    breaks, controls and backslashes; dollars and backticks are encoded as well,
-    so evidence cannot resemble shell substitution in the printed command.
+    Unicode escape normalization was observed before command validation; escaped
+    apostrophes then became shell syntax and were lost. Emit punctuation literally
+    and let shlex.quote preserve apostrophes with adjacent quoted segments. Dollars
+    and backticks remain single-quoted data. JSON still encodes line breaks and
+    backslashes. This changes serialization, not the command permission boundary.
     """
-    encoded = json.dumps(comment, ensure_ascii=True, separators=(",", ":"))
-    for character, escape in (("'", "\\u0027"), ("$", "\\u0024"), ("`", "\\u0060")):
-        encoded = encoded.replace(character, escape)
-    return f"'{encoded}'"
+    return shlex.quote(json.dumps(comment, ensure_ascii=False, separators=(",", ":")))
 
 
 def investigate(key: str, observation: str, interpretation: str, unknown: str, path: Path) -> list[str]:
@@ -915,7 +1093,8 @@ def investigate(key: str, observation: str, interpretation: str, unknown: str, p
         *evidence,
     ])
     comment = {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": nodes}]}
-    body = (_quoted_evidence(comment) if any(record["command"] == "logs" for record in records)
+    body = (_quoted_evidence(comment) if any(record["command"] in ("logs", "traces", "trace")
+                                           for record in records)
             else quoted(compact(comment)))
     return [f"jira-as collaborate comment add {key} -b {body} --format adf"]
 
