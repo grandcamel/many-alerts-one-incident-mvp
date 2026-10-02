@@ -1733,6 +1733,13 @@ def events_for(
             "jira-as, version 2.0.0 (build sha256-e93783151feab4e23dcb4e2c1d7b33751d01fcc3)",
         ),
         (
+            "incident-payload",
+            "toolu_payload",
+            "Bash",
+            {"command": "incident-payload --help"},
+            "usage: incident-payload [-h] STEP ...",
+        ),
+        (
             "skill read",
             "toolu_read",
             "Read",
@@ -1832,6 +1839,7 @@ def test_a_run_that_does_what_it_is_asked_is_ok(upstream, runs, unreadable, clau
     assert [(line.check, line.level) for line in model] == [
         ("model", "OK"),
         ("jira-as", "OK"),
+        ("incident-payload", "OK"),
         ("skill read", "OK"),
         ("run", "OK"),
     ]
@@ -1849,6 +1857,7 @@ def test_the_run_has_the_real_flags_and_only_its_own_prompt(upstream, runs, unre
     real = build_run_command(runs, KEY, model="claude-haiku-5", budget_usd=0.5)
     assert ["claude", *argv] == [*real[:-1], prompt]
     assert "jira-as --version" in prompt and PROMPT.format(project_key=KEY) not in argv
+    assert "`incident-payload --help`" in prompt
 
 
 def test_the_run_holds_a_sentinel_and_an_address_where_no_jira_is(
@@ -1907,7 +1916,7 @@ def test_the_run_works_in_its_own_directory_under_the_runs_directory(
     assert str(working / "transcript.jsonl") in only(lines, "run").message
 
 
-@pytest.mark.parametrize("denied", ["jira-as", "skill read"])
+@pytest.mark.parametrize("denied", ["jira-as", "incident-payload", "skill read"])
 def test_a_denied_allowed_call_points_at_the_organisation_s_managed_rules(
     upstream, runs, unreadable, claude, denied
 ):
@@ -1979,6 +1988,7 @@ def test_a_run_that_never_makes_the_calls_warns(upstream, runs, unreadable, clau
     lines = model_run(upstream, runs, unreadable, claude)
 
     assert only(lines, "jira-as").level == "WARN"
+    assert only(lines, "incident-payload").level == "WARN"
     assert only(lines, "skill read").level == "WARN"
 
 

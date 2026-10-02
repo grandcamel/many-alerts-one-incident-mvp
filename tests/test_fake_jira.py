@@ -7,7 +7,8 @@ rejection and post-function, authentication, the state dump and the request log.
 The second part starts the fake on a free localhost port and runs the real `jira-as`
 CLI against it: every `jira-as` command line in the Skill as `skill_template.render`
 renders it for each workflow, with the placeholders the Skill leaves to the Run filled
-in, through the whole create → add labels → comment → move → resolve sequence; then
+in, and every line `incident-payload` prints for the MVP's four Notifications, as
+printed, through the whole create → add labels → comment → move → resolve sequence; then
 `configure` against the fake, whose `.env` `verify --mvp --replay` then reads to watch a
 scripted Run take the fake project through the MVP's lifecycle. Without `jira-as` on
 PATH that part is skipped, with the reason, never failed.
@@ -31,7 +32,7 @@ from urllib.parse import quote
 
 import pytest
 
-from grafana_jsm_sandbox import configure, fake_jira, skill_template, verify
+from grafana_jsm_sandbox import configure, fake_jira, incident_payload, skill_template, verify
 from grafana_jsm_sandbox.demo_config import (
     FIELD_VARIABLES,
     STATUS_VARIABLES,
@@ -49,8 +50,9 @@ from grafana_jsm_sandbox.fake_jira import (
     Server,
     Workflow,
 )
+from grafana_jsm_sandbox.notification import NOTIFICATION_FILENAME
 from grafana_jsm_sandbox.reset import jira_as_with
-from grafana_jsm_sandbox.run_command import SKILL_FILE
+from grafana_jsm_sandbox.run_command import RENDERED_SKILL, SKILL_FILE
 from grafana_jsm_sandbox.verify import World
 from grafana_jsm_sandbox.verify_mvp import MVP_SEQUENCE
 from tests.conftest import FIXTURES, REPOSITORY
@@ -949,127 +951,154 @@ def shape(line: str) -> str:
 
 @pytest.mark.usefixtures("jira_as_cli")
 def test_the_real_jira_as_carries_out_every_command_line_of_the_rendered_skill(
-    served, workflow, monkeypatch
+    served, workflow, monkeypatch, tmp_path
 ):
-    """create → add labels → comment → move → resolve, with the CLI the Runs use, on each workflow."""
+    """The MVP's four Notifications, one Run each, on each workflow, with the CLI the Runs use:
+    the Skill's own lines with the Run's placeholders filled, and every line `incident-payload`
+    prints, run exactly as printed. One create, and the Incident ends done with a resolution."""
     jira_as = cli_for(served, monkeypatch)
     project = project_for(workflow, served.fake)
     rendered = skill_template.render(TEMPLATE, project)
     commands = {shape(line): line for line in skill_commands(rendered)}
     assert set(commands) == {
         "search jql",
-        "issue create",
         "getProjectComponents",
-        "comment opened",
-        "editIssue",
         "getServerInfo",
-        "issue get",
-        "comment update",
-        "comment resolved",
         "collaborate comment",
-        "resolve",
         "lifecycle transitions",
         "move",
+        "resolve",
+        "issue get",
     }, "a command line joined or left the Skill; teach this test its shape"
     covered = set()
+    runs = tmp_path / "runs"
+    skill_template.materialize(REPOSITORY / "skill", runs / RENDERED_SKILL, project)
+    firing, repeat, related, resolved = MVP_SEQUENCE
 
     def run(name: str, **values: object) -> str:
         covered.add(name)
         return jira_as(*shlex.split(fill(commands[name], values))[1:])
 
-    fingerprints = ["87e2f184874a3b71", "3c1d9a7e5b2f8046"]
-    later = ["a94f0c2e7d13b58c", "6e0b5d3f19c7a2e4"]
-    alerts = {
-        "alertname": ["NoTraffic", "SuccessRateDrop"],
-        "current": ["0", "0.42"],
-        "n": 2,
-        "incident_group": GROUP,
-    }
-    description = fill(
-        re.search(r"```json\n(.*?)\n```", rendered, re.DOTALL)[1],
-        {
-            **alerts,
-            "instance": "rolldice:8082",
-            "summary annotation": "no traffic",
-            "startsAt": "2026-09-30T12:00:00Z",
-            "generatorURL": "http://grafana.example.invalid/alerting",
-        },
-    )
+    def payload(notification: str, *argv: str) -> list[str]:
+        """What `incident-payload` prints, less its `#` lines, in this Notification's Run."""
+        working = runs / Path(notification).stem
+        working.mkdir(exist_ok=True)
+        (working / NOTIFICATION_FILENAME).write_bytes((FIXTURES / notification).read_bytes())
+        lines = incident_payload.printed(list(argv), working)
+        return [line for line in lines if not line.startswith("#")]
 
-    assert json.loads(run("search jql", incident_group=GROUP))["issues"] == []
+    def as_printed(line: str, key: str | None = None) -> str:
+        """One printed line, run as written but for the Incident's key in place of `<key>`."""
+        if key is not None:
+            line = line.replace("<key>", key)
+        assert "<key>" not in line
+        return jira_as(*shlex.split(line)[1:])
+
+    def against(match: dict, notification: str, step: str, *more: str) -> list[str]:
+        server_time = json.loads(run("getServerInfo"))["serverTime"]
+        return payload(
+            notification,
+            step,
+            "--key",
+            match["key"],
+            "--labels",
+            ",".join(match["fields"]["labels"]),
+            "--created",
+            match["fields"]["created"],
+            "--server-time",
+            server_time,
+            *more,
+        )
+
+    def the_match() -> dict:
+        [search] = payload(firing, "match")
+        assert search == fill(commands["search jql"], {"incident_group": GROUP})
+        covered.add("search jql")
+        [match] = json.loads(as_printed(search))["issues"]
+        return match
+
+    # Run 1: three Alerts firing and no Match, so the one create.
+    [search] = payload(firing, "match")
+    assert json.loads(as_printed(search))["issues"] == []
     components = {component["name"] for component in json.loads(run("getProjectComponents"))}
-    create = commands["issue create"] + (
-        " --components 'rolldice'" if "rolldice" in components else ""
-    )
-    covered.add("issue create")
-    created = jira_as(
-        *shlex.split(
-            fill(
-                create,
-                {
-                    **alerts,
-                    "summary": f"{GROUP}: 2 alerts firing on rolldice",
-                    "fingerprint": fingerprints,
-                    "description": description,
-                },
-            )
-        )[1:]
-    )
-    key = re.search(rf"\b({KEY}-\d+)\b", created)[1]
-    run("comment opened", key=key, **alerts)
+    component = ["--component", "rolldice"] if "rolldice" in components else []
+    dry_run, create, opened = payload(firing, "create", *component)
+    assert json.loads(as_printed(dry_run))["dry_run"] is True
+    assert served.fake.state()["issues"] == [], "the dry run sent nothing"
+    key = re.search(rf"\b({KEY}-\d+)\b", as_printed(create))[1]
+    as_printed(opened, key)
 
-    [match] = json.loads(run("search jql", incident_group=GROUP))["issues"]
+    match = the_match()
     assert match["key"] == key and match["fields"]["status"]["name"] == project.status_open
+    fingerprints = ["87e2f184874a3b71", "3c1d9a7e5b2f8046", "a94f0c2e7d13b58c"]
     assert match["fields"]["labels"] == [
         f"grp-{GROUP}",
         f"ses-{SESSION}",
         *(f"fp-{fp}" for fp in fingerprints),
     ]
 
-    run("editIssue", key=key, fingerprint=later)
+    # Run 2: the same three again, so no label and one comment; Open moves on.
+    [comment] = against(match, repeat, "update")
+    as_printed(comment)
+    created_at = datetime.strptime(match["fields"]["created"], JIRA_TIME).replace(tzinfo=UTC)
     server_time = datetime.strptime(
         json.loads(run("getServerInfo"))["serverTime"], JIRA_TIME
     ).replace(tzinfo=UTC)
-    issue = json.loads(run("issue get", key=key))
-    created_at = datetime.strptime(issue["fields"]["created"], JIRA_TIME).replace(tzinfo=UTC)
     assert timedelta(0) <= server_time - created_at < timedelta(minutes=5)
-    run("comment update", key=key, **alerts, fingerprint=later, duration="1m")
     transitions = {
         t["to"]["name"]: t["id"] for t in json.loads(run("lifecycle transitions", key=key))
     }
     run("move", key=key, id=transitions[project.status_in_progress])
-    assert (
-        json.loads(run("issue get", key=key))["fields"]["status"]["name"]
-        == project.status_in_progress
-    )
 
+    # Run 3: the sustained-outage Alert joins: its label, then one comment.
+    match = the_match()
+    assert match["fields"]["status"]["name"] == project.status_in_progress
+    add, comment = against(match, related, "update")
+    assert as_printed(add).strip() in ("", "null")
+    as_printed(comment)
+
+    # Run 4: every Alert resolved, so the close.
+    match = the_match()
     listed = json.loads(run("collaborate comment", key=key))
-    assert len(listed.get("comments", listed) if isinstance(listed, dict) else listed) == 2, (
-        "step 2c counts the Runs by the comments so far: the opening one and one update"
-    )
-    run("comment resolved", key=key, duration="9m", incident_group=GROUP, n=4, m=3)
+    assert len(listed["comments"]) == 1, "the Skill asks for one comment, not every one"
+    count = listed["total"]
+    assert count == 3, "step 2c counts the Runs by the comments so far"
+    [comment] = against(match, resolved, "close", "--runs", str(count))
+    as_printed(comment)
     transitions = {
         t["to"]["name"]: t["id"] for t in json.loads(run("lifecycle transitions", key=key))
     }
     run("resolve", key=key, id=transitions[project.status_done])
     fields = json.loads(run("issue get", key=key))["fields"]
+    assert set(fields) == {"status", "resolution"}, "the check reads two fields and no more"
     assert (
         fields["status"]["name"] == project.status_done and fields["resolution"]["name"] == "Done"
     )
-    assert json.loads(run("search jql", incident_group=GROUP))["issues"] == []
+    assert json.loads(as_printed(search))["issues"] == []
 
     assert covered == set(commands)
+    assert [issue["key"] for issue in served.fake.state()["issues"]] == [key], "one create"
     state = Client(served.fake).state(key)
+    joined = "fp-" + json.loads((FIXTURES / related).read_text())["alerts"][3]["fingerprint"]
     assert state["labels"] == [
         f"grp-{GROUP}",
         f"ses-{SESSION}",
-        *(f"fp-{fp}" for fp in fingerprints + later),
+        *(f"fp-{fp}" for fp in fingerprints),
+        joined,
     ]
-    assert [c["text"].split(":")[0].split(" ")[0] for c in state["comments"]] == [
+    assert state["summary"] == f"{GROUP}: 3 alerts firing on rolldice"
+    description = state["description"].splitlines()
+    assert description[0] == f"Partial Report: 3 alerts firing in group {GROUP}."
+    assert len(description) == 4 and all("value=" in line for line in description[1:])
+    texts = [c["text"] for c in state["comments"]]
+    assert [text.split(":")[0].split(" ")[0] for text in texts] == [
         "Opened",
+        "Update",
         "Update",
         "Resolved",
     ]
+    assert "New: none." in texts[1] and f"({joined})" in texts[2]
+    assert f"(4 Alerts, 4 Runs). {project.status_done} automatically" in texts[3]
     assert [h["to"] for h in state["history"]] == [
         project.status_open,
         project.status_in_progress,

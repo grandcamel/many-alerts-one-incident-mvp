@@ -3,9 +3,11 @@
 The Skill in the repo is a template, and what a Run reads is its rendering for
 the project `.env` names. These tests render the real template, because the
 Skill is read off a screen during the demo: every placeholder filled, the
-project's key wherever the Skill names a project, only the configured field ids
-in the create command, and a field the project lacks named as one to leave off
-rather than left as a gap for a Run to fill.
+project's key wherever the Skill names a project, the configured field ids in its
+facts, and a field the project lacks named as one to leave off rather than left as
+a gap for a Run to fill. Beside it the rendering holds the same facts as data, for
+`incident-payload`, which builds every payload, so the Skill asks a Run to write no
+ADF and no JSON of its own.
 """
 
 from __future__ import annotations
@@ -21,12 +23,14 @@ from pathlib import Path
 import pytest
 
 from grafana_jsm_sandbox.demo_config import DemoProject
+from grafana_jsm_sandbox.incident_payload import FACTS_FILE, Facts
 from grafana_jsm_sandbox.run_command import SKILL_FILE
 from grafana_jsm_sandbox.skill_template import (
     DEFAULT_SESSION_LABEL,
     READ_ONLY_DIRECTORY,
     READ_ONLY_FILE,
     SkillTemplateError,
+    facts,
     materialize,
     render,
 )
@@ -56,15 +60,6 @@ SESSION = "ses-rehearsal1"
 SESSIONED = replace(CONFIGURED, session_id="rehearsal1")
 """The configured project in the take `DEMO_SESSION_ID=rehearsal1`, whose label is `SESSION`."""
 
-CUSTOM_FIELDS = re.compile(r"--custom-fields '([^']*)'")
-LABELS = re.compile(r"--labels '([^']*)'")
-
-
-def create_command(skill: str) -> str:
-    """The Skill's one example create command."""
-    [line] = [line for line in skill.splitlines() if line.startswith("jira-as issue create")]
-    return line
-
 
 def match_search(skill: str) -> str:
     """The Skill's one Match search."""
@@ -72,16 +67,30 @@ def match_search(skill: str) -> str:
     return line
 
 
-def create_labels(skill: str) -> list[str]:
-    """The labels the example create command sets, in order."""
-    [labels] = LABELS.findall(create_command(skill))
-    return labels.split(",")
+def commands(skill: str, prose: bool = True) -> list[str]:
+    """Every command line the Skill spells out, fenced, then quoted in its prose.
+
+    A prose quote that follows a "never" names a command not to run, and is left out.
+    """
+    fenced = [
+        line
+        for block in re.findall(r"```bash\n(.*?)```", skill, flags=re.DOTALL)
+        for line in block.splitlines()
+    ]
+    if not prose:
+        return fenced
+    quoted = [
+        found[1]
+        for found in re.finditer(r"`((?:jira-as|incident-payload) [^`]+)`", skill)
+        if "never" not in skill[max(0, found.start() - 40) : found.start()].lower()
+    ]
+    return fenced + quoted
 
 
-def custom_fields(skill: str) -> dict:
-    """The create command's custom fields, with an empty object for the Description's ADF."""
-    [fields] = CUSTOM_FIELDS.findall(create_command(skill))
-    return json.loads(fields.replace("<description>", "{}"))
+def section(skill: str, heading: str) -> str:
+    """One `## ` section of the Skill, its heading included, with its lines joined."""
+    [body] = [part for part in skill.split("\n## ") if part.startswith(heading)]
+    return " ".join(body.split())
 
 
 def fact(skill: str, name: str) -> str:
@@ -158,7 +167,7 @@ def test_the_session_label_is_rendered_wherever_the_skill_names_the_session():
 
     assert "{{" not in skill
     assert f'labels = "{SESSION}"' in match_search(skill)
-    assert SESSION in create_labels(skill)
+    assert f"`grp-<incident_group>`, `{SESSION}`, and `fp-<fingerprint>`" in skill
     assert "ses-<" not in skill, "a Run must never be left to spell the session label itself"
 
 
@@ -167,7 +176,7 @@ def test_without_a_configured_session_every_run_shares_one_label():
     still a label a Run can search by and never a gap for a Run to fill."""
     skill = render(TEMPLATE, CONFIGURED)
 
-    assert DEFAULT_SESSION_LABEL in create_labels(skill)
+    assert f"`{DEFAULT_SESSION_LABEL}`, and `fp-<fingerprint>`" in skill
     assert f'labels = "{DEFAULT_SESSION_LABEL}"' in match_search(skill)
     assert re.fullmatch(r"ses-[a-z0-9-]{1,32}", DEFAULT_SESSION_LABEL)
 
@@ -197,30 +206,32 @@ def test_the_skill_creates_one_incident_for_the_group_with_every_alert_s_fingerp
     assert "Handle every Alert in it independently" not in text
     assert "never creates one Incident per Alert" in text
     assert "never creates a second one for a group that already has one open" in text
-    assert create_labels(skill)[:2] == ["grp-<incident_group>", SESSION]
-    assert create_labels(skill)[2:] == ["fp-<fingerprint>", "fp-<fingerprint>"], (
-        "one fp- entry per Alert, and the Skill shows more than one"
+    assert (
+        f"`grp-<incident_group>`, `{SESSION}`, and `fp-<fingerprint>` for every Alert in the "
+        "Notification, resolved ones included. No other label." in text
     )
     assert "[Create](#step-2a--create-the-incident) the one Incident" in skill
+    assert "incident-payload create --component '<service>'" in commands(skill)
 
 
 def test_the_skill_updates_an_open_match_by_adding_labels_and_one_comment():
-    """The label add is jira-as 2.0.0's `api call editIssue` with an `update.labels` add: its
-    `issue update --labels` replaces the set, which would drop the group and session labels."""
+    """The label add is jira-as 2.0.0's `api call editIssue` with an `update.labels` add, which
+    `incident-payload update` prints: its `issue update --labels` replaces the set, which would
+    drop the group and session labels."""
     skill = render(TEMPLATE, SESSIONED)
-    [add] = [line for line in skill.splitlines() if line.startswith("jira-as api call editIssue")]
+    update = section(skill, "Step 2b")
 
-    assert add.startswith(
-        "jira-as api call editIssue --issue-id-or-key <key> --field 'update.labels=["
+    assert (
+        "incident-payload update --key <key> --labels '<label>,<label>' --created '<created>' "
+        "--server-time '<serverTime>'" in commands(skill)
     )
-    assert '{"add":"fp-<fingerprint>"}' in add
-    assert "jira-as issue update" not in "".join(
-        line for line in skill.splitlines() if line.startswith("jira-as")
-    )
+    assert "an `api call editIssue` with an `update.labels` add" in update
+    assert "Never use `jira-as issue update --labels` for this" in update
+    assert not any(command.startswith("jira-as issue update") for command in commands(skill))
     assert "Never remove a label" in skill
     assert "[Update](#step-2b--update-the-incident) it, then move it to `Work in progress`" in skill
     assert "[Update](#step-2b--update-the-incident) it and nothing else" in skill
-    assert "which Alerts are new and which repeat" in skill
+    assert "which Alerts are new, which repeat and which resolved" in update
 
 
 def test_a_resolved_notification_closes_the_match_and_is_skipped_without_one():
@@ -245,11 +256,99 @@ def test_chapter_one_s_rules_still_hold():
     assert "is human-owned: still add new `fp-` labels and comments" in skill
     assert "`critical` → `Sev-1`" in skill and "`Sev-1` → `Critical`" in skill
     assert "never pass `--to`" in skill
-    [adf] = [line for line in skill.splitlines() if line.startswith('{"type":"doc"')]
-    document = json.loads(adf)
-    assert document["version"] == 1
-    assert [node["type"] for node in document["content"]] == ["paragraph", "bulletList"]
-    assert "<summary annotation>" in adf and "<startsAt>" in adf and "value=<current>" in adf
+    assert "Never remove a label." in skill
+    assert "and say in the finish that a duplicate exists" in " ".join(skill.split())
+
+
+# --- A Run builds no payload by hand (the 2026-10-01 rehearsals) ---
+
+
+def test_the_skill_asks_for_no_adf_and_no_hand_built_json():
+    """Haiku wrote the Description's ADF under `--custom-fields` by hand, six times wrong. The
+    Skill now names neither: `incident-payload` builds the payload and prints the command."""
+    for project in (CONFIGURED, BARE):
+        skill = render(TEMPLATE, project)
+
+        assert '{"type":"doc"' not in skill
+        assert "ADF" not in skill
+        assert "--custom-fields" not in skill and "--description" not in skill
+        assert "`jira-as issue create" not in skill
+        assert not any(command.startswith("jira-as issue create") for command in commands(skill))
+        assert "You never build a Jira payload by hand." in skill
+
+
+def test_every_step_s_payload_comes_from_incident_payload():
+    skill = render(TEMPLATE, SESSIONED)
+    fenced = commands(skill, prose=False)
+    named = [command for command in fenced if command.startswith("incident-payload")]
+
+    assert [command.split()[1] for command in named] == ["match", "create", "update", "close"]
+    assert "incident-payload create" in commands(skill), "without a component"
+    text = " ".join(skill.split())
+    assert "exactly as printed. Change nothing in it except a literal `<key>`" in text
+    assert "If it prints a line starting `incident-payload: error:`, stop there" in text
+    assert "Never build the command yourself instead." in text
+
+
+def test_the_create_is_dry_run_first_then_made_exactly_once():
+    create = section(render(TEMPLATE, SESSIONED), "Step 2a")
+
+    assert "**The dry run**" in create and "sends nothing to Jira" in create
+    assert "holds a `bulletList` with one `listItem` per firing Alert" in create
+    assert "Run it **exactly once**." in create
+    assert "Never run the create a second time, never retry it with other fields" in create
+    assert "never edit the Description afterwards" in create
+    assert "never create an Incident to probe what the project accepts" in create
+
+
+def test_every_jql_query_names_the_project():
+    """Sonnet twice searched `key = <KEY>-NNN` and jira-as refused it for lacking one."""
+    for project in (CONFIGURED, BARE, SESSIONED):
+        skill = render(TEMPLATE, project)
+        searches = [command for command in commands(skill) if " search jql " in command]
+
+        assert searches
+        for search in searches:
+            assert search.startswith(f"jira-as search jql 'project = {project.key} AND ")
+        assert f"Every JQL query names the project, `project = {project.key}`" in " ".join(
+            skill.split()
+        )
+
+
+def test_a_known_key_is_read_with_issue_get_and_a_field_list_never_with_jql():
+    """A whole issue on a work site was 20 to 40 KB of asset fields: `Output too large`."""
+    skill = render(TEMPLATE, SESSIONED)
+    reads = [command for command in commands(skill) if " issue get " in command]
+
+    assert reads == ["jira-as issue get <key> --fields status,resolution -o json"]
+    assert not re.search(r"issue get <key> -o json", skill)
+    assert "never looked up with JQL" in " ".join(skill.split())
+    assert "Never read a whole issue without `--fields`" in " ".join(skill.split())
+    assert not any("key =" in command for command in commands(skill))
+
+
+def test_the_duration_is_the_match_s_created_and_jira_s_clock_with_no_further_read():
+    """The Match search returns `created`, so an update or a close reads no issue for it."""
+    skill = render(TEMPLATE, SESSIONED)
+
+    assert match_search(skill).endswith("--fields key,status,labels,created -o json")
+    for heading in ("Step 2b", "Step 2c"):
+        step = section(skill, heading)
+        assert "jira-as -o json api call getServerInfo" in step
+        assert "--created '<created>' --server-time '<serverTime>'" in step
+        assert "search jql" not in step and "issue get <key> -o json" not in step
+    assert "the Match's own `fields.created`, from the search" in section(skill, "Step 2b")
+
+
+def test_a_close_is_checked_for_a_resolution_and_fails_without_one():
+    close = section(render(TEMPLATE, SESSIONED), "Step 2c")
+
+    assert "jira-as issue get <key> --fields status,resolution -o json" in close
+    assert (
+        "If its `fields.status.name` is `Completed` and its `fields.resolution` is null, "
+        "finish `failed`" in close
+    )
+    assert "--leave-status" in close
 
 
 # --- A project with every field ---
@@ -262,8 +361,7 @@ def test_every_place_the_skill_names_a_project_names_the_configured_one():
     assert "the Jira SANDBOX project" in skill.split("---")[1], "the frontmatter"
     assert fact(skill, "Project") == "`SANDBOX`"
     assert "jira-as search jql 'project = SANDBOX AND issuetype = Incident" in skill
-    assert "getProjectComponents --projectIdOrKey SANDBOX`" in skill
-    assert create_command(skill).startswith("jira-as issue create -p SANDBOX -t Incident ")
+    assert "jira-as -o json api call getProjectComponents --projectIdOrKey SANDBOX" in skill
 
 
 def test_the_facts_name_each_configured_field_id_with_the_values_it_takes():
@@ -277,48 +375,73 @@ def test_the_facts_name_each_configured_field_id_with_the_values_it_takes():
     assert "Never touch Major incident (`customfield_20004`)." in skill
 
 
-def test_the_example_create_command_sets_the_configured_fields_then_the_description():
-    skill = render(TEMPLATE, CONFIGURED)
+def test_the_facts_beside_the_skill_are_the_ones_it_shows(tmp_path):
+    """`incident-payload` reads these, so they must say what the Skill's table says."""
+    target = materialize(TEMPLATE_DIRECTORY, tmp_path / ".skill", SESSIONED)
 
-    assert custom_fields(skill) == {
-        "customfield_20001": {"value": "Sev-1"},
-        "customfield_20002": {"value": "Critical"},
-        "customfield_20003": {"value": "Monitoring systems"},
-        "description": {},
-    }
-    assert list(custom_fields(skill))[-1] == "description"
+    written = Facts.from_json((target / FACTS_FILE).read_text(encoding="utf-8"))
+    assert written == facts(SESSIONED)
+    assert written == Facts(
+        project="SANDBOX",
+        session_label=SESSION,
+        severity_field="customfield_20001",
+        urgency_field="customfield_20002",
+        source_field="customfield_20003",
+        status_done="Completed",
+    )
+    skill = (target / SKILL_FILE).read_text(encoding="utf-8")
+    for field_id in (written.severity_field, written.urgency_field, written.source_field):
+        assert f"`{field_id}`" in skill
 
 
-def test_the_example_create_command_is_one_line_the_allow_list_matches():
+def test_a_field_the_project_lacks_is_null_in_the_facts(tmp_path):
+    target = materialize(TEMPLATE_DIRECTORY, tmp_path / ".skill", BARE)
+
+    written = json.loads((target / FACTS_FILE).read_text(encoding="utf-8"))
+    assert written["severity_field"] is None
+    assert written["urgency_field"] is None and written["source_field"] is None
+    assert "major_incident_field" not in written, "a Run never touches it, so the tool never does"
+
+
+@pytest.mark.parametrize("project", [CONFIGURED, BARE])
+def test_every_command_the_skill_spells_out_is_one_line_the_allow_list_matches(project):
     """One line of plain single quotes, or the permission boundary denies it whole (README)."""
-    command = create_command(render(TEMPLATE, CONFIGURED))
-
-    assert shlex.split(command)[:2] == ["jira-as", "issue"]
-    assert "$'" not in command and "\\" not in command
+    for command in commands(render(TEMPLATE, project)):
+        assert command.split()[0] in ("jira-as", "incident-payload"), command
+        assert shlex.split(command)
+        assert "$'" not in command and "\\" not in command and "\n" not in command
 
 
 def test_alert_text_quotes_are_replaced_without_shell_escape_syntax():
     skill = render(TEMPLATE, BARE)
 
-    assert "Write every `'` from alert text as `’` (U+2019)" in skill
+    assert "`incident-payload` writes every `'` from alert text as `’` (U+2019)" in skill
     assert r"never use `'\''` or `$'…'`" in skill
 
 
 def test_closing_reads_comments_to_count_runs():
-    skill = " ".join(render(TEMPLATE, BARE).split())
-    close = skill.split("## Step 2c", 1)[1].split("## Moving", 1)[0]
+    close = section(render(TEMPLATE, BARE), "Step 2c")
 
     assert "one per comment on the Incident, the opening one included" in close
-    assert "`jira-as collaborate comment list <key> -o json`" in close
+    assert "--runs <count>" in close and "counts this Run as one more" in close
+
+
+def test_the_run_count_is_the_total_of_a_one_comment_list_not_every_comment():
+    """`comment list` returns up to 50 comments, each with author objects and an ADF body, about
+    2 KB a Run: a long take would grow it toward Claude Code's "Output too large", and past 50
+    the count of comments read would be wrong. `total` is right however many there are."""
+    close = " ".join(section(render(TEMPLATE, BARE), "Step 2c").split())
+
+    assert "jira-as collaborate comment list <key> --limit 1 -o json" in close
+    assert "jira-as collaborate comment list <key> -o json" not in close
+    assert "The count is the `total` of the comment list" in close
+    assert "that `total` as the count" in close
 
 
 def test_a_successful_label_add_is_not_rechecked_or_retried():
     skill = render(TEMPLATE, BARE)
 
-    assert (
-        "`jira-as api call editIssue` prints `null` on success; do not re-check or retry it."
-        in skill
-    )
+    assert "It prints `null` on success; do not re-check or retry it." in section(skill, "Step 2b")
 
 
 def test_no_other_site_s_field_id_survives_rendering():
@@ -339,28 +462,29 @@ def test_a_project_with_no_optional_field_is_told_to_leave_each_off_naming_no_id
     assert fact(skill, "Urgency field") == "none on this project, so leave Urgency off"
     assert fact(skill, "Source field") == "none on this project, so leave Source off"
     assert "Never touch Major incident." in skill
-    assert custom_fields(skill) == {"description": {}}
 
 
 @pytest.mark.parametrize("missing", ["severity_field", "urgency_field", "source_field"])
-def test_a_missing_field_is_left_out_of_the_create_command_and_the_rest_stay(missing):
+def test_a_missing_field_is_left_out_of_the_skill_and_the_facts_and_the_rest_stay(missing):
     project = DemoProject(**{**CONFIGURED.__dict__, missing: None})
     skill = render(TEMPLATE, project)
 
     absent = getattr(CONFIGURED, missing)
     assert absent not in skill
-    assert absent not in custom_fields(skill)
+    assert getattr(facts(project), missing) is None
     present = {"severity_field", "urgency_field", "source_field"} - {missing}
     for attribute in present:
-        assert getattr(CONFIGURED, attribute) in custom_fields(skill)
+        assert getattr(CONFIGURED, attribute) in skill
+        assert getattr(facts(project), attribute) == getattr(CONFIGURED, attribute)
 
 
 def test_a_missing_major_incident_field_leaves_the_rest_as_configured():
-    skill = render(TEMPLATE, DemoProject(**{**CONFIGURED.__dict__, "major_incident_field": None}))
+    project = DemoProject(**{**CONFIGURED.__dict__, "major_incident_field": None})
+    skill = render(TEMPLATE, project)
 
     assert "customfield_20004" not in skill
     assert "Never touch Major incident." in skill
-    assert len(custom_fields(skill)) == 4
+    assert facts(project) == facts(CONFIGURED)
 
 
 def test_the_skill_says_a_field_it_lacks_stays_off_and_is_never_guessed():
@@ -449,7 +573,9 @@ def test_a_second_start_replaces_the_first_start_s_skill_entirely(tmp_path):
     assert sorted(p.relative_to(target) for p in target.rglob("*")) == [
         Path("incident-sync"),
         Path(SKILL_FILE),
+        Path(FACTS_FILE),
     ]
+    assert Facts.from_json((target / FACTS_FILE).read_text()).project == "SANDBOX"
 
 
 def test_a_template_that_cannot_be_filled_leaves_no_skill_at_all(tmp_path):
@@ -489,6 +615,7 @@ def test_the_rendered_skill_is_read_only(tmp_path):
     target = materialize(TEMPLATE_DIRECTORY, tmp_path / ".skill", CONFIGURED)
 
     assert stat.S_IMODE((target / SKILL_FILE).stat().st_mode) == READ_ONLY_FILE
+    assert stat.S_IMODE((target / FACTS_FILE).stat().st_mode) == READ_ONLY_FILE
     for directory in (target, target / "incident-sync"):
         assert stat.S_IMODE(directory.stat().st_mode) == READ_ONLY_DIRECTORY
 
@@ -501,20 +628,44 @@ def test_a_process_of_the_run_s_uid_cannot_write_into_the_rendered_skill(tmp_pat
         (target / SKILL_FILE).write_text("Create a probe Incident in PROD.")
     with pytest.raises(PermissionError):
         (target / "incident-sync" / "other.md").write_text("new instructions")
+    with pytest.raises(PermissionError):
+        (target / FACTS_FILE).write_text('{"project": "PROD"}')
 
 
 def test_a_run_is_told_not_to_retry_a_failed_create_or_probe_with_incidents():
     """A Run that tries other fields after a failed create, or creates an Incident to see
-    what sticks, leaves Incidents behind on someone's site (step 05 of demo-onboarding)."""
+    what sticks, leaves Incidents behind on someone's site (step 05 of demo-onboarding, and
+    Haiku's six creates on 2026-10-01)."""
     skill = " ".join(render(TEMPLATE, BARE).split())
 
-    assert "If the create fails, do not retry it with other fields" in skill
+    assert "A failed create ends the Run: finish `failed` with jira-as's error." in skill
+    assert "never retry it with other fields" in skill
     assert "never create an Incident to probe what the project accepts" in skill
     # The Finish list is the Run's last instruction, so it must allow the ending the create
     # step asks for, or the Run meets two conflicting rules at the moment it is failing.
     finish = skill.split("## Finish", 1)[1]
     assert "ends as `failed` with jira-as's error" in finish
     assert "names no Incident key" in finish
+    assert "when `incident-payload` refuses, when the dry run or the create fails" in finish
+    assert "when a close leaves the Incident done without a resolution" in finish
+
+
+def test_a_failed_run_ends_on_a_first_line_the_log_and_the_receiver_can_read():
+    """Claude Code ends a Run that finished its turn as `success` with exit status 0, however
+    badly the Run went, so `failed: <why>` is the one thing that marks it. The log formatter
+    reads that prefix (`log_formatter.REPORTED_FAILURE`); a Finish that words it another way
+    leaves a refused create looking like a success."""
+    skill = render(TEMPLATE, BARE)
+    finish = " ".join(skill.split("## Finish", 1)[1].split())
+
+    assert "Its final message begins `failed: <why>`" in finish
+    assert "those characters first, with nothing before them" in finish
+    assert "read that first line, and only that line, to mark the Run failed" in finish
+    assert "a Run that ends any other way is counted a success" in finish
+    assert (
+        "To finish `failed` is to end with a final message whose first line is `failed: <why>`"
+        in (" ".join(skill.split()))
+    )
 
 
 def test_the_skill_renders_custom_statuses_and_leaves_human_owned_statuses():
@@ -534,7 +685,10 @@ def test_the_skill_renders_custom_statuses_and_leaves_human_owned_statuses():
         assert old not in skill
     assert "is human-owned: still add new `fp-` labels and comments" in skill
     assert "including when every Alert resolves" in skill
-    assert "left the status to the human, then stop without transitioning it" in skill
+    assert (
+        "left the status to the human. Run what it prints, then stop without transitioning it"
+        in " ".join(skill.split())
+    )
     assert "jira-as lifecycle transition <key> --id <id> --resolution Done" in skill
     assert "whose `to.name` is the target" in skill
     assert "post-function may set the resolution instead" in skill

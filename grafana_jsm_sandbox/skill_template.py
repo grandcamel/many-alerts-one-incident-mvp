@@ -15,6 +15,11 @@ was rendered from. A field the project lacks is rendered as a field to leave off
 naming no id, because a Run shown a gap tends to go looking for something to fill
 it with, and a Run that guesses a field id creates nothing.
 
+Beside the Skill, `materialize` writes the same facts as data, `project.json`, for
+`incident-payload`, the local command that builds a Run's Jira payloads (ADR 0003's
+2026-10-01 amendment). A Run reads the facts in the Skill and the command reads them
+in the file, and both come from this one rendering, never from a secret.
+
 Two functions do the work: `render`, which is pure and refuses a template that
 names a placeholder it cannot fill, and `materialize`, which writes a whole
 rendered skill directory where a Run will read it.
@@ -22,7 +27,6 @@ rendered skill directory where a Run will read it.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -31,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from grafana_jsm_sandbox.demo_config import DEFAULT_SESSION_ID, DemoProject, session_label
+from grafana_jsm_sandbox.incident_payload import FACTS_FILE, Facts
 
 PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
 """`{{NAME}}`, a spelling that appears nowhere else in the Skill: its JSON never opens two
@@ -88,15 +93,11 @@ FIELDS = (
         "Monitoring systems",
     ),
 )
-"""The fields a Run sets on create, in the order the create command sets them. The example is
-the value the Skill's one example command writes, which is a critical Alert's."""
+"""The fields a create sets, in the order `incident-payload` sets them. The example is a
+critical Alert's value, the one `configure` checks the site offers."""
 
 MAJOR_INCIDENT_ATTRIBUTE = "major_incident_field"
 """The field a Run is told never to touch, and so the one it is never given an example for."""
-
-DESCRIPTION = '"description": <description>'
-"""The last member of the create command's custom fields, which the Skill fills from its ADF
-template. It is always there: the Description is a system field every project has."""
 
 SESSION_PLACEHOLDER = "SESSION_LABEL"
 """The Jira label every Incident of one demo session carries, `ses-<DEMO_SESSION_ID>`, so a
@@ -119,20 +120,29 @@ def placeholders(project: DemoProject) -> dict[str, str]:
         "STATUS_IN_PROGRESS": project.status_in_progress,
         "STATUS_DONE": project.status_done,
     }
-    custom_fields = []
     for field in FIELDS:
         field_id = getattr(project, field.attribute)
         if field_id:
             filled[field.placeholder] = f"`{field_id}`, {field.values}"
-            custom_fields.append(f"{json.dumps(field_id)}: {json.dumps({'value': field.example})}")
         else:
             filled[field.placeholder] = f"none on this project, so leave {field.name} off"
-    filled["CUSTOM_FIELDS"] = "{" + ", ".join([*custom_fields, DESCRIPTION]) + "}"
     major_incident = getattr(project, MAJOR_INCIDENT_ATTRIBUTE)
     filled["MAJOR_INCIDENT"] = (
         f"Major incident (`{major_incident}`)" if major_incident else "Major incident"
     )
     return filled
+
+
+def facts(project: DemoProject) -> Facts:
+    """The facts `incident-payload` reads, which are the ones the Skill shows a Run."""
+    return Facts(
+        project=project.key,
+        session_label=project.session_label,
+        severity_field=project.severity_field,
+        urgency_field=project.urgency_field,
+        source_field=project.source_field,
+        status_done=project.status_done,
+    )
 
 
 def render(template: str, project: DemoProject) -> str:
@@ -168,7 +178,8 @@ def materialize(source: Path, target: Path, project: DemoProject) -> Path:
     laptop, where the runs directory is an ordinary directory rather than a
     tmpfs. Everything is then rendered before anything is written, so a template
     that cannot be filled leaves no Skill at all rather than half of one. The
-    result is made read-only (`READ_ONLY_FILE`). Returns `target`.
+    project's facts go in beside it as `FACTS_FILE`, over any file of that name in
+    `source`. The result is made read-only (`READ_ONLY_FILE`). Returns `target`.
     """
     source, target = Path(source), Path(target)
     if not source.is_dir():
@@ -187,6 +198,7 @@ def materialize(source: Path, target: Path, project: DemoProject) -> Path:
             contents[relative] = rendered.encode("utf-8")
         else:
             contents[relative] = path.read_bytes()
+    contents[Path(FACTS_FILE)] = facts(project).as_json().encode("utf-8")
     target.mkdir(parents=True)
     for relative, content in contents.items():
         written = target / relative

@@ -21,6 +21,7 @@ import re
 import shutil
 import ssl
 import subprocess
+import sys
 import urllib.request
 from collections.abc import Mapping
 from fnmatch import fnmatch
@@ -546,7 +547,7 @@ class TestAStackThatIsUp:
         assert "{{" not in read.stdout
 
     def test_a_run_would_find_the_tools_it_is_allowed_to_use(self):
-        for tool in ("claude", "jira-as"):
+        for tool in ("claude", "jira-as", "incident-payload"):
             found = compose("exec", "-T", DEMO_SERVICE, "sh", "-c", f"command -v {tool}")
             assert found.returncode == 0, f"{tool} is not on the Run's PATH"
 
@@ -662,6 +663,41 @@ def test_claude_code_and_jira_as_are_pinned():
 def test_the_user_the_container_ends_as_was_created_by_this_dockerfile():
     """Not inherited from a base image whose groups and sudoers nobody here wrote (story 14)."""
     assert run_user() in useradd_arguments()
+
+
+INCIDENT_PAYLOAD_LAUNCHER = REPOSITORY / "docker" / "incident-payload"
+"""The one other command a Run may execute, as the image puts it on the PATH (ADR 0003's
+2026-10-01 amendment)."""
+
+
+def test_incident_payload_is_on_the_path_beside_jira_as():
+    """A launcher for the package's own module, which the image copies to /app."""
+    assert (
+        "COPY --chmod=0755 docker/incident-payload /usr/local/bin/incident-payload"
+        in dockerfile_instructions()
+    ), "the image sets the mode itself, so a checkout that lost the executable bit still works"
+    assert INCIDENT_PAYLOAD_LAUNCHER.read_text().splitlines()[0] == "#!/usr/bin/python3 -I"
+
+
+def test_the_launcher_runs_the_package_s_incident_payload_in_isolated_mode(tmp_path):
+    """Run as the image runs it, with this checkout standing where the image has /app."""
+    launcher = INCIDENT_PAYLOAD_LAUNCHER.read_text()
+    assert 'sys.path.insert(0, "/app")' in launcher
+    script = tmp_path / "incident-payload"
+    script.write_text(launcher.replace('"/app"', repr(str(REPOSITORY))))
+
+    ran = subprocess.run(
+        [sys.executable, "-I", str(script), "--help"],
+        cwd=tmp_path,
+        env={},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.startswith("usage: incident-payload")
 
 
 ENTRYPOINT = REPOSITORY / "docker" / "entrypoint.sh"

@@ -75,10 +75,10 @@ RUN npm install -g --allow-scripts="@anthropic-ai/claude-code" \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 
-# The only thing a Run may execute. Pinned, because the skill is written in its
-# invocations and was verified against this version. Its own venv keeps its
-# dependencies out of the interpreter the Receiver runs on; the symlink puts the
-# one command a Run may call on the PATH next to `claude`.
+# The only thing a Run may execute that reaches anything. Pinned, because the skill
+# is written in its invocations and was verified against this version. Its own venv
+# keeps its dependencies out of the interpreter the Receiver runs on; the symlink puts
+# it on the PATH next to `claude`.
 RUN python3 -m venv /opt/jira-as \
     && /opt/jira-as/bin/pip install --no-cache-dir "jira-as==${JIRA_AS_VERSION}" \
     && ln -s /opt/jira-as/bin/jira-as /usr/local/bin/jira-as
@@ -91,6 +91,15 @@ WORKDIR /app
 COPY --chown=demo:demo grafana_jsm_sandbox/ /app/grafana_jsm_sandbox/
 COPY --chown=demo:demo skill/ /app/skill/
 COPY --chown=demo:demo docker/entrypoint.sh /app/entrypoint.sh
+
+# The one other command a Run may execute (ADR 0003's 2026-10-01 amendment): a launcher for
+# this package's `incident_payload`, which prints the jira-as lines a Run would otherwise build
+# by hand, from the Notification and the project's facts beside the rendered Skill. It reaches
+# nothing, and like everything here it sits on the read-only root, so no Run can change it.
+# The mode is set here, not taken from the checkout: a clone with `core.fileMode=false`, or a
+# commit that dropped the executable bit, would otherwise build an image where every Run's
+# call fails with "permission denied". `--chmod` is BuildKit's, which compose uses.
+COPY --chmod=0755 docker/incident-payload /usr/local/bin/incident-payload
 
 # Where this container keeps the two directories the Receiver is told about. The
 # credentials are not here and are not in the image: compose hands them in from an

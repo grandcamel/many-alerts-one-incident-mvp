@@ -17,16 +17,40 @@ An Alert is `firing` or `resolved`, and its `fingerprint` is its identity across
 every Notification it ever appears in. The Notification's own `status` is
 `firing` while any Alert in it fires, and `resolved` once every one of them has.
 
-You can run `jira-as` and read files. Nothing else — no writing files, no `curl`,
-no `date`, no other command. Every invocation below is one you can run as written.
+You can run `jira-as` and `incident-payload`, and read files. Nothing else — no
+writing files, no `curl`, no `date`, no other command. Every invocation below is
+one you can run as written.
 
-**Write each `jira-as` invocation on a single line, in plain single quotes.** The
-permission boundary denies a whole command that is split across lines with `\`,
-that carries a newline inside an argument, or that uses `$'...'` — it will not
-match the allow list however harmless it looks. Nothing you need has a newline in
-it: the one field that wants paragraphs is the Description, and it gets them from
-the ADF form below instead.
-Write every `'` from alert text as `’` (U+2019); never use `'\''` or `$'…'`.
+## You decide; `incident-payload` writes the payloads
+
+You make every judgment here: whether there is a Match, and whether to create,
+update, close or skip. You never build a Jira payload by hand. `incident-payload`
+reads `notification.json` and this project's facts itself, and prints the
+`jira-as` lines for the step you name, each one complete:
+
+- Run every printed line that starts with `jira-as`, in the order printed,
+  exactly as printed. Change nothing in it except a literal `<key>`, which you
+  replace with the Incident's key.
+- A printed line that starts with `#` says what the next one does, or what to say
+  when you finish. It is not a command.
+- If it prints a line starting `incident-payload: error:`, stop there and finish
+  `failed` with that line. Never build the command yourself instead.
+- To finish `failed` is to end with a final message whose first line is `failed: <why>`;
+  the [Finish](#finish) says how, and why it must be that line.
+
+**Every command is one line, in plain single quotes.** The permission boundary
+denies a whole command that is split across lines with `\`, that carries a newline
+inside an argument, or that uses `$'...'` — it will not match the allow list however
+harmless it looks. The lines below and the lines `incident-payload` prints are
+already like that. Where you copy a value from jira-as's output into an argument,
+such as `--labels` or `--created`, put it in plain single quotes.
+`incident-payload` writes every `'` from alert text as `’` (U+2019); never use `'\''` or `$'…'`.
+
+**Read Jira narrowly.** Every JQL query names the project, `project = {{PROJECT_KEY}}`,
+as the Match search does. An Incident whose key you know is never looked up with
+JQL: read it with `issue get` and an explicit `--fields` list, the one the step
+names. Never read a whole issue without `--fields`: on a real site that is tens of
+kilobytes of fields no step needs.
 
 ## The project
 
@@ -53,25 +77,34 @@ but leave its status to the human, including when every Alert resolves.
 ## Step 1 — find the Match
 
 The Match is the one open Incident carrying this group's label and this
-session's label:
+session's label. Ask for its search:
 
 ```bash
-jira-as search jql 'project = {{PROJECT_KEY}} AND issuetype = Incident AND labels = "grp-<incident_group>" AND labels = "{{SESSION_LABEL}}" AND statusCategory != Done' --fields key,status,labels -o json
+incident-payload match
+```
+
+It prints one search, which is always this one with the group's label filled in.
+Run the line it printed:
+
+```bash
+jira-as search jql 'project = {{PROJECT_KEY}} AND issuetype = Incident AND labels = "grp-<incident_group>" AND labels = "{{SESSION_LABEL}}" AND statusCategory != Done' --fields key,status,labels,created -o json
 ```
 
 An empty `issues` array means there is no Match. Otherwise the one issue in it
-is the Match: its `key`, its `fields.status.name`, which the next step branches
-on, and its `fields.labels`, which say what the Incident has already seen. A
-{{STATUS_DONE}} Incident is deliberately not a Match: a group that fires again after
-its Incident was completed gets a new Incident. Should the search ever find more
-than one issue — it should not, Runs happen one at a time — take the one with
-the lowest number as the Match, never create another, never close either, and
-say in the finish that a duplicate exists.
+is the Match: its `key`; its `fields.status.name`, which the next step branches
+on; its `fields.labels`, which say what the Incident has already seen; and its
+`fields.created`, which an update and a close need. A {{STATUS_DONE}} Incident is
+deliberately not a Match: a group that fires again after its Incident was
+completed gets a new Incident. Should the search ever find more than one issue —
+it should not, Runs happen one at a time — take the one with the lowest number as
+the Match, never create another, never close either, and say in the finish that a
+duplicate exists.
 
-Then sort the Notification's Alerts against the Match. An Alert whose
+The Notification's Alerts sort against the Match. An Alert whose
 `fp-<fingerprint>` label is already on the Match is a **repeat**; one whose
 label is not there yet is **new**; and a `resolved` Alert is **resolved**,
 whichever of those it would otherwise be. With no Match every firing Alert is new.
+`incident-payload update` and `close` sort them this way and print the result.
 
 Then act on what you found:
 
@@ -82,110 +115,92 @@ Then act on what you found:
 | `firing` | `{{STATUS_IN_PROGRESS}}` | [Update](#step-2b--update-the-incident) it and nothing else |
 | `firing` | any other status | [Update](#step-2b--update-the-incident) labels and comment; leave the status to the human |
 | `resolved` | `{{STATUS_OPEN}}` or `{{STATUS_IN_PROGRESS}}` | [Close](#step-2c--close-the-incident) it |
-| `resolved` | any other status | Add new `fp-` labels and comment that every Alert resolved and the status was left to the human; do not transition |
+| `resolved` | any other status | [Close](#step-2c--close-the-incident) with `--leave-status`: add new `fp-` labels and comment that every Alert resolved and the status was left to the human; do not transition |
 | `resolved` | none | Do nothing. Say you skipped it and why: every Alert is resolved and no open Incident carries the group and session labels |
 
 ## Step 2a — create the Incident
 
-Map the group onto the fields:
+First the component. When every firing Alert carries the same `service` label,
+check whether a component of that exact name exists on {{PROJECT_KEY}}:
+
+```bash
+jira-as -o json api call getProjectComponents --projectIdOrKey {{PROJECT_KEY}}
+```
+
+If it is there, name it. If it is not, or the firing Alerts carry different
+services, leave the component off entirely: an unknown service must not fail the
+create.
+
+```bash
+incident-payload create --component '<service>'
+```
+
+Without the component, that is `incident-payload create`. It prints three
+commands, in this order:
+
+1. **The dry run**: the create with `--dry-run`, which sends nothing to Jira and
+   prints the payload it would send. Run it. It must succeed, and its
+   `fields.description` must be a document whose `content` holds a `bulletList`
+   with one `listItem` per firing Alert. If the dry run fails, or its
+   `description` holds the JSON as text instead, finish `failed`.
+2. **The create**: the same command without `--dry-run`. Run it **exactly once**.
+   It prints the new Incident's key.
+3. **The opening comment**, with `<key>`: put that key in its place and run it.
+
+A failed create ends the Run: finish `failed` with jira-as's error. Never run the
+create a second time, never retry it with other fields, never edit the Description
+afterwards, and never create an Incident to probe what the project accepts. The
+Incident is created in `{{STATUS_OPEN}}`; do not transition it on the first Firing.
+
+What `incident-payload` fills in, so you can read the dry run against it:
 
 - **Summary** — the `incident_group` label, then `: `, then how many Alerts are
   firing, as `<n> alerts firing`, then ` on ` and the `service` label when every
   firing Alert carries the same one. So `checkout-outage: 3 alerts firing on rolldice`.
-- **Description** — a short partial Report of every firing Alert: its name, its
-  instance, its `summary` annotation, its value and when it started, and its
-  `generatorURL`. Written as ADF, because that is the only way to get separate
-  lines out of a command that cannot contain one. See
-  [the template](#the-description) below.
+- **Description** — a short partial Report, `Partial Report: <n> alerts firing in
+  group <incident_group>.`, then one bullet per firing Alert, in the order the
+  Notification lists them: its name, its instance, its `summary` annotation, its
+  value and when it started, and its `generatorURL`.
 - **Severity** — the worst across the firing Alerts' `severity` labels: any
   `critical` → `Sev-1`, otherwise any `warning` → `Sev-2`, otherwise `Sev-3`.
 - **Urgency** — follows Severity: `Sev-1` → `Critical`, `Sev-2` → `High`,
   `Sev-3` → `Medium`.
-- **Component** — the `service` label, but only if every firing Alert carries
-  the same one and a component of that exact name already exists on
-  {{PROJECT_KEY}}. Check with
-  `jira-as -o json api call getProjectComponents --projectIdOrKey {{PROJECT_KEY}}`. If it is
-  not there, leave the component off entirely. An unknown service must not fail
-  the create.
+- **Source** — `Monitoring systems`.
 - **Labels** — `grp-<incident_group>`, `{{SESSION_LABEL}}`, and `fp-<fingerprint>`
   for every Alert in the Notification, resolved ones included. No other label.
 
-```bash
-jira-as issue create -p {{PROJECT_KEY}} -t Incident -s '<summary>' --labels 'grp-<incident_group>,{{SESSION_LABEL}},fp-<fingerprint>,fp-<fingerprint>' --custom-fields '{{CUSTOM_FIELDS}}'
-```
-
-The labels are one comma-separated list, one `fp-` entry per Alert. That sets
-exactly the fields [the project](#the-project) gives an id for. A field it says
-this project lacks stays off: never look for its id, never guess one.
-
-Add `--components '<service>'` only when that component exists. The Incident is
-created in `{{STATUS_OPEN}}`; do not transition it on the first Firing.
-
-If the create fails, do not retry it with other fields, and never create an
-Incident to probe what the project accepts: finish as `failed`, with jira-as's
-error.
-
-Then record what it opened from, so the next Run can compare against it:
-
-```bash
-jira-as collaborate comment add <key> -b 'Opened from <n> firing Alerts in <incident_group>: <alertname> value=<current>; <alertname> value=<current>.'
-```
-
-One `<alertname> value=<current>` per firing Alert, separated by `; `.
-`<current>` is that Alert's `values.A`.
-
-### The description
-
-The Description goes in under `--custom-fields` with the other fields, as one
-line of ADF JSON — `issue create` has no `--description` that understands
-paragraphs, and a command may not contain a newline. Fill in the placeholders,
-repeat the `listItem` once per firing Alert in the order the Notification lists
-them, change nothing else, and paste it in place of `<description>` above,
-unquoted, as a JSON value among the others:
-
-```json
-{"type":"doc","version":1,"content":[{"type":"paragraph","content":[{"type":"text","text":"Partial Report: <n> alerts firing in group <incident_group>."}]},{"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph","content":[{"type":"text","text":"<alertname> on <instance>: <summary annotation>. value=<current>, since <startsAt>. <generatorURL>"}]}]}]}]}
-```
-
-`<startsAt>` is the Alert's own `startsAt`, copied as written: it is a fact about
-the Alert, not a duration, so Grafana's clock is fine here.
+It sets exactly the fields [the project](#the-project) gives an id for. A field it
+says this project lacks stays off: never look for its id, never guess one.
 
 ## Step 2b — update the Incident
 
-First give the Match the labels of the new Alerts, one `{"add":…}` per new
-Alert, all in one command. Skip this command entirely when no Alert is new:
-
-```bash
-jira-as api call editIssue --issue-id-or-key <key> --field 'update.labels=[{"add":"fp-<fingerprint>"},{"add":"fp-<fingerprint>"}]'
-```
-
-That adds to the labels and changes nothing else. Never use
-`jira-as issue update --labels` for this: it replaces the whole label set, and
-would take the group and session labels off the Incident.
-`jira-as api call editIssue` prints `null` on success; do not re-check or retry it.
-
-Then read how long the Incident has been open: the Jira clock now, minus the
-Incident's own `created`. Read both off Jira, never off the Alert — Grafana's
-clock and Jira's are not the same clock, and a Notification replayed from a
-fixture can carry a `startsAt` that has not happened yet:
+Read Jira's clock:
 
 ```bash
 jira-as -o json api call getServerInfo
-jira-as issue get <key> -o json
 ```
 
-`serverTime` from the first, `created` from the second. Write the difference like
-`4m30s`. That is the only clock you can reach, so use it for every duration.
-
-Then post one comment and no more than one, in exactly this shape, so the next
-Run and the audience can read which Alerts are new and which repeat:
+How long the Incident has been open is that `serverTime` minus the Match's own
+`fields.created`, from the search. Both come off Jira, never off the Alert:
+Grafana's clock and Jira's are not the same clock, and a Notification replayed
+from a fixture can carry a `startsAt` that has not happened yet. Give
+`incident-payload` the Match's key, its `fields.labels` joined with commas, its
+`fields.created` and the `serverTime`, each copied as jira-as printed it:
 
 ```bash
-jira-as collaborate comment add <key> -b 'Update: <n> firing. New: <alertname> (fp-<fingerprint>) value=<current>; <alertname> (fp-<fingerprint>) value=<current>. Repeat: <alertname> value=<current>; <alertname> value=<current>. Resolved: <alertname>. Open for <duration>.'
+incident-payload update --key <key> --labels '<label>,<label>' --created '<created>' --server-time '<serverTime>'
 ```
 
-Each of `New`, `Repeat` and `Resolved` lists its Alerts separated by `; `, and
-reads `none` when there is no such Alert. `<current>` is that Alert's `values.A`.
+It prints, in order, the label add for every Alert whose `fp-` label the Match
+lacks, or a line saying none is needed, and then the one update comment, which
+says which Alerts are new, which repeat and which resolved, their values, and how
+long the Incident has been open. Run both. Post that one comment and no other.
+
+The label add is an `api call editIssue` with an `update.labels` add, which adds
+to the labels and changes nothing else. It prints `null` on success; do not
+re-check or retry it. Never use
+`jira-as issue update --labels` for this: it replaces the whole label set, and
+would take the group and session labels off the Incident.
 
 If the Match is in `{{STATUS_OPEN}}`, move it on after commenting — see
 [transitions](#moving-an-incident). If it is already in `{{STATUS_IN_PROGRESS}}`, stop
@@ -194,33 +209,54 @@ stop after adding labels and commenting: a human owns the status.
 
 ## Step 2c — close the Incident
 
-Every Alert in the Notification is resolved. If any of them has no `fp-` label on
-the Match yet, add it first, exactly as in [step 2b](#step-2b--update-the-incident):
-an Incident keeps the label of every Alert it ever saw. Count the Runs: one per
-comment on the Incident, the opening one included, read with
-`jira-as collaborate comment list <key> -o json`. The duration is the Jira
-clock now minus the Incident's `created`, read the same way as in step 2b.
-
-If the Match is in any status other than `{{STATUS_OPEN}}` or
-`{{STATUS_IN_PROGRESS}}`, comment that every Alert resolved and that you
-left the status to the human, then stop without transitioning it.
-
-Otherwise post the closing comment:
+Every Alert in the Notification is resolved. Read Jira's clock as in
+[step 2b](#step-2b--update-the-incident), and count the Runs so far: one per
+comment on the Incident, the opening one included. The count is the `total` of
+the comment list, so ask for one comment: only the `total` matters, and each
+comment is long.
 
 ```bash
-jira-as collaborate comment add <key> -b 'Resolved after <duration>: every Alert in <incident_group> is resolved (<n> Alerts, <m> Runs). {{STATUS_DONE}} automatically from the Grafana Notification.'
+jira-as -o json api call getServerInfo
+jira-as collaborate comment list <key> --limit 1 -o json
 ```
 
-Then move it to `{{STATUS_DONE}}` **with a resolution**:
+Then give `incident-payload` what step 2b does, and that `total` as the count:
 
 ```bash
+incident-payload close --key <key> --labels '<label>,<label>' --created '<created>' --server-time '<serverTime>' --runs <count>
+```
+
+It prints the label add for any Alert whose `fp-` label the Match lacks, because an
+Incident keeps the label of every Alert it ever saw, and then the closing comment,
+which counts this Run as one more.
+
+If the Match is in any status other than `{{STATUS_OPEN}}` or
+`{{STATUS_IN_PROGRESS}}`, add `--leave-status`: the comment it prints then says
+that every Alert resolved and that you left the status to the human. Run what it
+prints, then stop without transitioning it.
+
+Otherwise run what it prints, and then move the Incident to `{{STATUS_DONE}}`
+**with a resolution**, using the id of the transition whose `to.name` is
+`{{STATUS_DONE}}`:
+
+```bash
+jira-as lifecycle transitions <key> -o json
 jira-as lifecycle transition <key> --id <id> --resolution Done
 ```
 
 Without the resolution the Incident stays in the Incidents queue forever, because
 that queue is `resolution = Unresolved`. This is the one place a resolution is set.
 jira-as 2.0.0 retries without `--resolution Done` when a transition screen rejects
-it; a workflow post-function may set the resolution instead.
+it; a workflow post-function may set the resolution instead. So read what the
+Incident ended as:
+
+```bash
+jira-as issue get <key> --fields status,resolution -o json
+```
+
+If its `fields.status.name` is `{{STATUS_DONE}}` and its `fields.resolution` is
+null, finish `failed`: the Incident is done without a resolution, and will stay in
+the queue. Do not transition it again.
 
 ## Moving an Incident
 
@@ -241,5 +277,18 @@ End with one line for the Incident, naming the group, the Incident key and what
 changed — `created`, `updated` with how many labels were added, `updated and
 moved to {{STATUS_IN_PROGRESS}}`, `completed`, or `skipped` and why — and then one line
 per Alert, naming its Fingerprint and whether it was `new`, `repeat` or
-`resolved`. A Run whose create failed ends as `failed` with jira-as's error, and
-names no Incident key because there is none. Nothing else after those lines.
+`resolved`. `incident-payload update` and `close` print both as `#` lines; after a
+create every firing Alert is `new` and every other one `resolved`.
+
+A Run that failed ends differently. Its final message begins `failed: <why>`: those
+characters first, with nothing before them, then jira-as's or `incident-payload`'s
+error as the why. The Receiver and the log read that first line, and only that
+line, to mark the Run failed; a Run that ends any other way is counted a success,
+whatever the Incident holds.
+
+A Run ends as `failed` with the error when `incident-payload` refuses, when the dry
+run or the create fails (the Forwarder's refusal of a create included), or when a
+close leaves the Incident done without a resolution. A Run whose create failed ends
+as `failed` with jira-as's error, and names no Incident key because there is none;
+after a close that left no resolution, the Incident's own Finish line follows the
+`failed:` line. Nothing else after those lines.

@@ -2,9 +2,9 @@
 
 The flags here are the demo's permission boundary (ADR 0003): a Run is started
 in a mode where anything outside the allow list is denied without a prompt, and
-the allow list is jira-as and reading under one absolute directory. These tests
-are what stops a later change from quietly widening that, which no other test in
-this repo would notice.
+the allow list is jira-as, the local `incident-payload` that prints jira-as lines,
+and reading under one absolute directory. These tests are what stops a later change
+from quietly widening that, which no other test in this repo would notice.
 """
 
 from __future__ import annotations
@@ -60,10 +60,13 @@ def test_anything_outside_the_allow_list_is_denied_without_a_prompt(command):
     assert value_of(command, "--permission-mode") == "dontAsk"
 
 
-def test_the_run_may_execute_jira_as_and_read_the_runs_directory_and_nothing_else(command):
-    """One Read rule: the runs directory holds the Notification and the rendered Skill both."""
+def test_the_run_may_execute_jira_as_and_incident_payload_and_read_the_runs_directory(command):
+    """One Read rule: the runs directory holds the Notification and the rendered Skill both.
+    `incident-payload` is the one addition since (ADR 0003's 2026-10-01 amendment): it builds
+    the payloads a Run would otherwise write by hand, and reaches nothing."""
     assert values_of(command, "--allowedTools") == [
         "Bash(jira-as *)",
+        "Bash(incident-payload *)",
         "Read(//srv/runs/**)",
     ]
     assert "--dangerously-skip-permissions" not in command
