@@ -69,6 +69,7 @@ from grafana_jsm_sandbox.demo_config import (
     session_label,
 )
 from grafana_jsm_sandbox.doctor import GrafanaUnanswered
+from grafana_jsm_sandbox.investigation_contract import is_investigation
 from grafana_jsm_sandbox.replay import FIXTURES, default_receiver
 from grafana_jsm_sandbox.reset import (
     COMPOSE_FAILURES,
@@ -167,7 +168,10 @@ ask for the oldest first and for more than a rehearsal's Incident will ever have
 
 @dataclass(frozen=True)
 class GroupIncident(Incident):
-    """An Incident as this scenario reads it: `verify`'s view, plus its labels."""
+    """An Incident as this scenario reads it: `verify`'s view, plus its labels.
+
+    Its comment count and text leave out marked investigation comments everywhere.
+    """
 
     labels: frozenset[str] = frozenset()
     repeat_comments: int = 0
@@ -175,7 +179,7 @@ class GroupIncident(Incident):
     summary: str = ""
     description: str = ""
     comment_texts: tuple[str, ...] = ()
-    """The comments' plain text, the opening one first."""
+    """The lifecycle comments' plain text, the opening one first."""
 
     @property
     def fingerprints(self) -> frozenset[str]:
@@ -220,7 +224,10 @@ def is_repeat_comment(body: object) -> bool:
     Matched loosely, in any case and anywhere in the comment, so that a Run that words the
     Skill's template a little differently is not a paid lifecycle reported NOT VERIFIED.
     """
-    text = " ".join(comment_text(body).split())
+    text = comment_text(body)
+    if is_investigation(text):
+        return False
+    text = " ".join(text.split())
     return bool(re.search(r"\bnew:\s*none\b", text, flags=re.IGNORECASE))
 
 
@@ -231,7 +238,10 @@ def new_fingerprints(body: object) -> frozenset[str]:
     the same reason: the label on the Incident is the proof, and the comment only ties it to
     a Run.
     """
-    text = " ".join(comment_text(body).split())
+    text = comment_text(body)
+    if is_investigation(text):
+        return frozenset()
+    text = " ".join(text.split())
     return frozenset(re.findall(r"\bfp-[0-9a-f]{1,64}\b", text))
 
 
@@ -354,7 +364,7 @@ class GroupWatch(Watch):
         return found
 
     def read(self, key: str) -> GroupIncident:
-        """`key`'s status, resolution, labels, Summary, Description and comments, oldest first."""
+        """`key`'s fields and lifecycle comments, oldest first, from a complete raw list."""
         jira_as = self.world.jira_as
         issue = json.loads(
             jira_as(
@@ -386,11 +396,18 @@ class GroupWatch(Watch):
             texts = tuple(
                 comment_text(comment.get("body")) for comment in comments.get("comments", [])
             )
+            total = int(comments.get("total", 0))
+            if len(texts) != total:
+                raise ValueError(
+                    f"jira-as listed {len(texts)} of {key}'s {total} comments, "
+                    f"and the checks need them all"
+                )
+            texts = tuple(text for text in texts if not is_investigation(text))
             incident = GroupIncident(
                 key=key,
                 status=fields["status"]["name"],
                 resolution=(fields.get("resolution") or {}).get("name"),
-                comments=int(comments.get("total", 0)),
+                comments=len(texts),
                 labels=frozenset(fields.get("labels") or ()),
                 repeat_comments=sum(is_repeat_comment(text) for text in texts),
                 commented_fingerprints=frozenset(
@@ -404,11 +421,6 @@ class GroupWatch(Watch):
             raise ValueError(
                 f"jira-as answered {key} in an unexpected shape ({failure!r})"
             ) from None
-        if len(texts) < incident.comments:
-            raise ValueError(
-                f"jira-as listed {len(texts)} of {key}'s {incident.comments} comments, "
-                f"and the checks need them all"
-            )
         self.incident = incident
         return incident
 
@@ -501,12 +513,11 @@ class Content:
 
     def closing(self, incident: GroupIncident) -> str:
         """The closing comment, the last, gives the duration, the Alert count and the Run count.
-        The Run count is the Incident's comments before the closing one, as the Skill counts
-        them, or with it, which is the Run that is writing."""
+        The Run count is exactly the lifecycle comments, including the closing one."""
         problem = closing_problem(
             incident.comment_texts[-1],
             self.alert_counts(incident),
-            range(incident.comments - 1, incident.comments + 1),
+            {incident.comments},
         )
         if problem:
             raise self.refuse(COMPLETED_STAGE, incident, problem)
