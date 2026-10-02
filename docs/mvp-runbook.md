@@ -96,7 +96,11 @@ presenter links; the Run receives only the four investigation variables.
 
    A restart keeps the old environment. Recreate the Viewer account/token after `lgtm` is
    recreated: `/data/grafana` has no persistent volume in this Compose setup. A 401 is reported
-   as `grafana-query: unavailable: token rejected`.
+   as `grafana-query: unavailable: token rejected`, but **this stack never sends one**: with
+   anonymous Admin on, Grafana answers a wrong or missing token as the anonymous user, so the
+   queries still succeed (rehearsal, 2026-10-02). A token mistake therefore does not show in the
+   Run. To check the token itself, open Grafana's Service accounts page: `demo-viewer`'s token
+   shows a recent "Last used" time after a Run's queries only when the Run sent a valid token.
 4. With separate permission for stack work, probe the installed `grafana-query` with the Viewer
    token against the pinned `grafana/otel-lgtm:0.33.0` before live acceptance. This free local
    probe uses no model and no Jira. Check the datasource-proxy GET path, Viewer access, query
@@ -123,8 +127,12 @@ TEXT --interpretation TEXT --unknown TEXT` builds the single evidence comment me
 that file, with the exact `[grafana-investigation] ` prefix and the Run's three judgments.
 Investigation comments do not count as lifecycle Runs in the closing comment or verifier.
 
-**Presenter and fallback:** say, “These queries authenticate with a Viewer token.” Grafana still
-allows anonymous Admin; Grafana query traffic bypasses the Jira Forwarder. A Run holds its model
+**Presenter and fallback:** say, “These queries authenticate with a Viewer token,” and only after
+checking that token as above. Grafana still allows anonymous Admin, so a wrong token would not
+stop the queries; do not present the token as what limits the Run's Grafana access. Grafana query
+traffic bypasses the Jira Forwarder. To rehearse the unavailable-evidence fallback, make Grafana
+unreachable for the Run (for example `DEMO_GRAFANA_URL=http://lgtm:3999`, then recreate demo); a
+bad token does not trigger it here. A Run holds its model
 credential and, when enabled, a Grafana Viewer credential; Jira still uses the Forwarder sentinel.
 Presenter links open in the presenter's browser under its identity, not the Run's token. Show the
 evidence comment on the live-fault path and check its Observation, Interpretation and Unknown /

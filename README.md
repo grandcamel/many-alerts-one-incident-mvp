@@ -214,7 +214,9 @@ to `http://localhost:3000`, with an explicit override when needed. The default p
 is `http://localhost:<GRAFANA_HOST_PORT>`, port `3000` when absent. Compose carries the resolved
 published port into the Receiver even for a shell override. Presenter links open in the
 presenter's browser under its identity, not the Run's token. Say, “These queries authenticate
-with a Viewer token.” Grafana still allows anonymous Admin, and query traffic bypasses the Jira Forwarder.
+with a Viewer token” only after checking the token (docs/mvp-runbook.md): Grafana still allows
+anonymous Admin, which also answers a wrong or missing token, so the token is the Run's identity,
+not a limit on its access. Query traffic bypasses the Jira Forwarder.
 A Run holds its model credential and, when enabled, a Grafana Viewer credential; Jira still
 uses the Forwarder's sentinel. The whole Grafana deployment is not read-only.
 

@@ -211,8 +211,10 @@ def test_investigation_setup_keeps_the_viewer_token_manual_and_private(document)
 def test_investigation_docs_distinguish_evidence_and_presenter_access(document):
     body = " ".join(document.read_text().split())
     for required in (
-        "These queries authenticate with a Viewer token.",
+        "These queries authenticate with a Viewer token",
         "anonymous Admin",
+        # The 2026-10-02 rehearsal: anonymous Admin also answers a wrong or missing token.
+        "wrong or missing token",
         "bypasses the Jira Forwarder",
         "presenter's browser",
         "zero, no data and unavailable",
