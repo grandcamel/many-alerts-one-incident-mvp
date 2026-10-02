@@ -782,7 +782,7 @@ def test_enabled_finish_preserves_lifecycle_success_despite_investigation_failur
 def test_disabled_rendering_preserves_baseline_except_close_accounting():
     import subprocess
 
-    baseline = subprocess.run(["git", "show", "ef17011:skill/incident-sync/SKILL.md"],
+    baseline = subprocess.run(["git", "show", "47d142236e144c91501c02133da78810466a80e1:skill/incident-sync/SKILL.md"],
                               check=True, capture_output=True, text=True).stdout
     previous = render(baseline, SESSIONED)
     current = render(TEMPLATE, SESSIONED)
