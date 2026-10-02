@@ -136,8 +136,8 @@ def test_default_logs_window_and_empty_result_are_evidence_not_health(grafana, c
     assert evidence["datasource"] == "loki"
     assert parameters["start"] == evidence["window"]["start"]
     assert parameters["end"] == evidence["window"]["end"]
-    assert (datetime.fromisoformat(parameters["end"].replace("Z", "+00:00")) -
-            datetime.fromisoformat(parameters["start"].replace("Z", "+00:00"))).total_seconds() == 600
+    assert (datetime.fromisoformat(parameters["end"]) -
+            datetime.fromisoformat(parameters["start"])).total_seconds() == 600
     assert parameters["limit"] == "100" and parameters["direction"] == "backward"
     assert "step" not in parameters and evidence["window"]["step_seconds"] is None
     assert lines[0] == "grafana-query: no data" and evidence["status"] == "empty"

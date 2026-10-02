@@ -174,7 +174,7 @@ def _utc(seconds: Decimal) -> str:
 def _loki_bound(seconds: Decimal) -> tuple[Decimal, str]:
     """Normalize a Loki request and Explore bound to the recorded UTC milliseconds."""
     bound = _utc(seconds)
-    delta = datetime.fromisoformat(bound.replace("Z", "+00:00")) - datetime(
+    delta = datetime.fromisoformat(bound) - datetime(
         1970, 1, 1, tzinfo=UTC
     )
     milliseconds = delta.days * 86_400_000 + delta.seconds * 1000 + delta.microseconds // 1000
