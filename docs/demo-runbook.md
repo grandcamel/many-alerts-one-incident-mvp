@@ -293,8 +293,9 @@ A re-fire deliberately gets a new Incident, which is the chapter two story, not 
 These are the five points the audience is there for, in the order the demo makes them
 available. Each has one thing on screen to point at.
 
-**The Run can only run jira-as.** A Run is headless Claude Code in print mode with
-`--permission-mode dontAsk` and an allow list of exactly two tools: `Bash(jira-as *)`, and `Read`
+**The Run can only run jira-as and one payload printer.** A Run is headless Claude Code in print mode with
+`--permission-mode dontAsk` and an allow list of exactly three rules: `Bash(jira-as *)`,
+`Bash(incident-payload *)`, a local command that only prints the `jira-as` lines to run, and `Read`
 of the runs directory, which holds each Run's Notification and Transcript and the rendered Skill,
 and nothing else.
 Anything else is denied without a prompt, and the denial is printed on a `[DENIED]` line in the
@@ -335,7 +336,7 @@ file; a non-root user, from the Dockerfile; no Docker socket; and credentials be
 which is the Forwarder. Say which is whose. All of those controls are the guide's, the
 Forwarder being its credential-proxy recommendation done for Jira. This repo's own are the
 image carrying nothing but Claude Code and `jira-as` (ADR 0005), the sizes of the limits, the
-sentinel the Forwarder swaps, and the `dontAsk` permission mode with its two-tool allow list,
+sentinel the Forwarder swaps, and the `dontAsk` permission mode with its three-rule allow list,
 which the guide is explicit is a permission gate and not a boundary. Two things the guide has
 that the demo does not: a custom seccomp profile (Docker's default one is what runs) and
 `--network none`, because the Receiver must accept Grafana's Notifications and reach Jira and

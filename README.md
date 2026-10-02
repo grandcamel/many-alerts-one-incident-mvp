@@ -4,8 +4,9 @@ A Grafana alert opens, updates and resolves a Jira Service Management Incident t
 headless Claude Code Run that holds no Jira credential. One `docker compose up` brings up a
 Grafana LGTM stack with one group of related alert rules, the small app those rules watch, the synthetic traffic
 whose absence fires it, and one hardened container whose main process receives the alert's
-Notification and starts a Run for it: Claude Code in print mode, allowed exactly two tools,
-following one Skill, reaching Jira through a localhost Forwarder that swaps a per-Run sentinel
+Notification and starts a Run for it: Claude Code in print mode, allowed two tools (Bash for
+`jira-as` and `incident-payload` alone, and Read of one directory), following one Skill,
+reaching Jira through a localhost Forwarder that swaps a per-Run sentinel
 for the real token. Stop the traffic and an Incident appears in the queue; start it again and
 the Incident is Completed, with the trend commented in between. It was built as a demo of what a
 sandboxed boundary looks like when the audience may ask what else the Run can reach, and
@@ -342,9 +343,9 @@ the status and what it means; a refusal there is classified exactly as the lapto
 asks the running Grafana, on `GRAFANA_HOST_PORT`, for the contact point, the one-minute repeat,
 the rule, a series for the rule's query, and whether the rule is Normal. `--with-model` starts
 one Run inside the container with the real flags and allow list, whose Jira is an address where
-nothing listens, and asks it only for `jira-as --version` and its Skill: it reports the model the
-seat ran, a failure in the log's own `[FAILED]` and `[hint]` words, and whether either allowed
-call was denied, which points at the organisation's managed permission rules. Each line is
+nothing listens, and asks it only for `jira-as --version`, `incident-payload --help` and its Skill:
+it reports the model the seat ran, a failure in the log's own `[FAILED]` and `[hint]` words, and
+whether any allowed call was denied, which points at the organisation's managed permission rules. Each line is
 `[<layer>] OK|WARN|FAIL <check> — <what it found, or the fix>`, a FAIL, or a WARN an admin could
 clear, naming the admin request (`docs/admin-requests.md#<anchor>`) where one fixes it; it ends
 `READY` (exit 0) or `NOT READY: <first blocker>` (exit 1), and exit 2 is a usage error. The line
@@ -485,7 +486,8 @@ The **skill** a Run follows, and the command line that starts one.
 
 [`skill/incident-sync/SKILL.md`](skill/incident-sync/SKILL.md) is the whole of what a Run knows
 about the project: the Fingerprint label format, the match JQL, the field mapping, the lifecycle
-rule, and every operation written as a `jira-as` invocation, because nothing else will execute. It
+rule, and every operation written as a `jira-as` or `incident-payload` invocation, because nothing
+else will execute. It
 is short on purpose — it is meant to be read off a screen during the demo. What a Run reads is its
 rendering for `.env`'s project, which `skill_template.py` writes read-only into `.skill` in the runs
 directory at every Receiver start (`/app/runs/.skill` in the container, on its tmpfs). The
@@ -493,7 +495,8 @@ Receiver replaces it itself; to delete a laptop's `runs` by hand, `chmod -R u+w 
 
 `build_run_command` is the command line that starts one Run: print mode, the model
 (`--model claude-opus-5` unless `RUN_MODEL` names another), a spending cap when `RUN_BUDGET_USD`
-sets one (`--max-budget-usd`), `dontAsk`, an allow list of `Bash(jira-as *)` and `Read` scoped to
+sets one (`--max-budget-usd`), `dontAsk`, an allow list of `Bash(jira-as *)`,
+`Bash(incident-payload *)` and `Read` scoped to
 one absolute directory, the runs directory, which holds the rendered Skill too
 (`Read(//app/runs/**)` in the container), stream-json with `--verbose`, and the rendered skill
 directory added so the Run can read it (ADR 0003). A bare `Read` was enough for a Run to read the
@@ -520,7 +523,9 @@ Two things the permission boundary decides for the skill, both found by running 
 
 - A `jira-as` command that is split across lines, carries a newline inside an argument, or uses
   `$'...'` does not match the allow list and is denied whole. Every invocation in the skill is one
-  line of plain single quotes; the Description gets its paragraphs from one line of ADF instead.
+  line of plain single quotes; the Description gets its paragraphs from one line of ADF instead,
+  which `incident-payload` builds and prints in the `jira-as issue create` line, so no Run writes
+  ADF by hand.
 - A Run has no clock of its own — `date` is not on the allow list — so every duration it reports is
   Jira's `serverTime` minus the Incident's `created`. Grafana's clock is never used for a duration,
   which is also what keeps a replayed fixture from reporting a negative one.
