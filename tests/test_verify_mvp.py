@@ -26,6 +26,7 @@ import pytest
 from grafana_jsm_sandbox import replay, verify, verify_content, verify_mvp
 from grafana_jsm_sandbox.demo_config import DemoProject
 from grafana_jsm_sandbox.doctor import GrafanaUnanswered
+from grafana_jsm_sandbox.investigation_contract import INVESTIGATION_MARKER, is_investigation
 from grafana_jsm_sandbox.notification import NOTIFICATION_FILENAME, validate_notification
 from grafana_jsm_sandbox.replay import FIXTURES
 from grafana_jsm_sandbox.run_command import RENDERED_SKILL
@@ -511,7 +512,11 @@ class GroupDemo:
                 incident = self.incidents[match[0]]
                 if not self.no_closing_comment:
                     incident.bodies.append(
-                        self.closing_override or closing_of(len(labels), incident.comments)
+                        self.closing_override
+                        or closing_of(
+                            len(labels),
+                            sum(not is_investigation(body) for body in incident.bodies) + 1,
+                        )
                     )
                     incident.comments += 1
                 incident.status = self.project.status_done
@@ -1747,8 +1752,8 @@ def test_the_sustained_alert_listed_as_a_repeat_instead_of_new_fails_related(dem
         ),
         (closing_of(4, 3).replace("Resolved after 9m", "Resolved"), "no `Resolved after"),
         (closing_of(3, 3), "3 Alerts, not 4"),
-        (closing_of(4, 9), "9 Runs, not 3 to 4"),
-        (closing_of(4, 2), "2 Runs, not 3 to 4"),
+        (closing_of(4, 9), "9 Runs, not 4"),
+        (closing_of(4, 2), "2 Runs, not 4"),
     ],
 )
 def test_a_closing_comment_without_the_duration_or_the_counts_fails_completed(demo, text, said):
@@ -1763,19 +1768,21 @@ def test_a_closing_comment_without_the_duration_or_the_counts_fails_completed(de
     assert "OK completed" not in " ".join(out)
 
 
-@pytest.mark.parametrize("runs", [3, 4])
-def test_the_run_count_is_the_comments_before_the_closing_one_or_with_it(demo, runs):
+@pytest.mark.parametrize("runs", [3, 4, 5])
+def test_the_run_count_is_exactly_the_lifecycle_comments_including_the_closing_one(demo, runs):
     demo.closing_override = closing_of(4, runs)
 
     status, out = run(demo)
 
-    assert status == 0, out
+    assert status == (0 if runs == 4 else 1), out
+    if runs != 4:
+        assert f"{runs} Runs, not 4" in failure_of(out, "completed")
 
 
 def test_a_closing_comment_whose_duration_is_spelled_out_still_counts(demo):
     demo.closing_override = (
         f"Resolved after 9 minutes 30 seconds: every Alert in {GROUP} is resolved "
-        "(4 Alerts, 3 Runs)."
+        "(4 Alerts, 4 Runs)."
     )
 
     status, out = run(demo)
@@ -1825,6 +1832,155 @@ def test_a_comment_list_shorter_than_its_total_is_not_checked_on_a_guess(demo):
     watch = verify_mvp.GroupWatch(demo.world([]), KEY, GROUP, SESSION, Timeouts())
     with pytest.raises(ValueError, match="listed 2 of SANDBOX-1's 4 comments"):
         watch.read(f"{KEY}-1")
+
+
+def investigation_answers(demo: GroupDemo, bodies: list[str], after_posts: int = 0) -> None:
+    """Add late investigation comments to Jira's answers without changing the fake Runs."""
+    original = demo.jira_as
+
+    def jira_as(*arguments: str) -> str:
+        answer = original(*arguments)
+        if arguments[:3] == ("collaborate", "comment", "list") and len(demo.posted) >= after_posts:
+            listed = json.loads(answer)
+            listed["comments"][1:1] = [{"body": body} for body in bodies]
+            listed["total"] += len(bodies)
+            return json.dumps(listed)
+        return answer
+
+    demo.jira_as = jira_as
+
+
+@pytest.mark.parametrize("adf", [False, True])
+@pytest.mark.parametrize(
+    ("prefix", "marked"),
+    [
+        (INVESTIGATION_MARKER, True),
+        ("[Grafana-investigation] ", False),
+        ("[grafana-investigation]", False),
+        (" " + INVESTIGATION_MARKER, False),
+        ("Human note: " + INVESTIGATION_MARKER, False),
+    ],
+)
+def test_investigation_helpers_use_the_exact_extracted_marker(adf, prefix, marked):
+    text = prefix + "Update: 4 firing. New: none. Evidence names fp-5a0f3e."
+    body = {"type": "doc", "content": [paragraph(text)]} if adf else text
+    assert verify_mvp.is_repeat_comment(body) is (not marked)
+    assert verify_mvp.new_fingerprints(body) == (frozenset() if marked else {"fp-5a0f3e"})
+
+
+def test_investigation_read_filters_before_all_lifecycle_accounting(demo):
+    key = demo.add("Completed", [GRP, SES, *ALL_LABELS], "Done")
+    lifecycle = [opening_of(GROUP_LABELS), "Human note", closing_of(4, 3)]
+    marked = INVESTIGATION_MARKER + "New: none. Evidence names fp-5a0f3e."
+    demo.incidents[key].bodies = [
+        INVESTIGATION_MARKER + opening_of(GROUP_LABELS),
+        lifecycle[0],
+        {"type": "doc", "content": [paragraph(marked)]},
+        lifecycle[1],
+        lifecycle[2],
+        INVESTIGATION_MARKER + closing_of(4, 6),
+    ]
+    demo.incidents[key].comments = 6
+    watch = verify_mvp.GroupWatch(demo.world([]), KEY, GROUP, SESSION, Timeouts())
+    incident = watch.read(key)
+    assert incident.comment_texts == tuple(lifecycle)
+    assert incident.comments == 3
+    assert incident.repeat_comments == 0
+    assert incident.commented_fingerprints == frozenset()
+    content = verify_mvp.Fixtures(watch)
+    content.opened = content.alerts(FIRING)
+    assert content.opening(incident)
+    assert content.closing(incident)
+
+
+@pytest.mark.parametrize("total", [1, 3])
+def test_investigation_raw_completeness_is_checked_before_filtering(demo, total):
+    key = demo.add("Open", [GRP, SES, *GROUP_LABELS])
+    demo.incidents[key].bodies = [opening_of(GROUP_LABELS), INVESTIGATION_MARKER + "New: none"]
+    demo.incidents[key].comments = total
+    watch = verify_mvp.GroupWatch(demo.world([]), KEY, GROUP, SESSION, Timeouts())
+    with pytest.raises(ValueError, match=f"listed 2 of {key}'s {total} comments"):
+        watch.read(key)
+    assert watch.incident is None
+
+
+@pytest.mark.parametrize("mode", [verify.REPLAY, verify.LIVE])
+def test_investigation_comments_do_not_change_a_complete_lifecycle(demo, mode):
+    investigation_answers(
+        demo,
+        [
+            INVESTIGATION_MARKER + "New: none. Evidence names " + RELATED_LABEL,
+            INVESTIGATION_MARKER + "Evidence unavailable",
+        ],
+    )
+    status, out = run(demo, mode)
+    assert status == 0, out
+    assert {"grouped", "updated", "related", "completed"} <= set(ok_stages(out))
+
+
+def test_late_investigation_comment_after_baseline_does_not_shift_update_slices(demo):
+    investigation_answers(demo, [INVESTIGATION_MARKER + "New: none. Not a lifecycle update."], 2)
+    status, out = run(demo)
+    assert status == 0, out
+    assert "the update comment lists 0 new, 3 repeat" in line(out, "OK", "updated")
+
+
+def test_investigation_opening_shaped_comment_cannot_satisfy_grouped(demo):
+    demo.no_opening_comment = True
+    investigation_answers(demo, [INVESTIGATION_MARKER + opening_of(GROUP_LABELS)])
+    status, out = run(demo, timeouts=Timeouts(run=60))
+    assert status == 1
+    assert "opening comment (0 comments)" in line(out, "FAIL", "grouped")
+    assert demo.posted == [FIRING]
+
+
+@pytest.mark.parametrize("mode", [verify.REPLAY, verify.LIVE])
+@pytest.mark.parametrize("stage", ["updated", "related"])
+def test_late_investigation_comment_cannot_satisfy_a_missing_lifecycle_update(demo, stage, mode):
+    original = demo._run
+
+    def run_without_update_comment(kind, labels, when):
+        demo.no_update_comment = kind == ("repeat" if stage == "updated" else "related")
+        original(kind, labels, when)
+
+    demo._run = run_without_update_comment
+    investigation_answers(
+        demo,
+        [INVESTIGATION_MARKER + update_of(ALL_LABELS, GROUP_LABELS)],
+        2 if mode == verify.REPLAY else 0,
+    )
+    status, out = run(demo, mode, timeouts=Timeouts(run=60, repeat=220))
+    assert status == 1
+    assert stage not in ok_stages(out)
+    assert line(out, "FAIL", stage)
+
+
+def test_investigation_repeat_shaped_comment_cannot_satisfy_live_repeat(demo):
+    demo.failing_runs = {"repeat"}
+    investigation_answers(demo, [INVESTIGATION_MARKER + update_of(ALL_LABELS, ALL_LABELS)])
+    status, out = run(demo, verify.LIVE)
+    assert status == 1
+    assert "related" in ok_stages(out)
+    assert "updated" not in ok_stages(out)
+    assert line(out, "FAIL", "updated")
+
+
+def test_investigation_comment_cannot_supply_live_minimum_two_updates(demo):
+    demo.probe_update = False
+    demo.failing_runs = {"related"}
+    investigation_answers(demo, [INVESTIGATION_MARKER + update_of(ALL_LABELS, ALL_LABELS)])
+    status, out = run(demo, verify.LIVE, timeouts=Timeouts(run=60, repeat=220))
+    assert status == 1
+    assert "updated" not in ok_stages(out)
+    assert "need a New: none repeat comment and at least two updates" in line(out, "FAIL", "updated")
+
+
+def test_investigation_closing_shaped_comment_cannot_satisfy_completed(demo):
+    demo.no_closing_comment = True
+    investigation_answers(demo, [INVESTIGATION_MARKER + closing_of(4, 4)], 4)
+    status, out = run(demo)
+    assert status == 1
+    assert "has no closing comment" in line(out, "FAIL", "completed")
 
 
 # --- The content, live: the Alerts are Grafana's Alertmanager's ---
@@ -2377,10 +2533,11 @@ def test_an_alert_of_the_group_that_is_not_in_the_notification_cannot_be_listed(
 @pytest.mark.parametrize(
     ("text", "ok"),
     [
-        ("Resolved after 4m30s: every Alert in g is resolved (4 Alerts, 3 Runs). Completed", True),
-        ("Resolved after 0s: every Alert in g is resolved (4 alerts, 3 runs).", True),
+        ("Resolved after 4m30s: every Alert in g is resolved (4 Alerts, 4 Runs). Completed", True),
+        ("Resolved after 0s: every Alert in g is resolved (4 alerts, 4 runs).", True),
         ("resolved after 1h2m3s: ... (4 Alerts, 4 Runs)", True),
-        ("Resolved after 4 minutes: ... ( 4 Alerts , 3 Runs )", True),
+        ("Resolved after 4 minutes: ... ( 4 Alerts , 4 Runs )", True),
+        ("Resolved after 4m30s: ... (4 Alerts, 3 Runs)", False),
         ("Resolved after about 4m: ... (4 Alerts, 3 Runs)", False),
         ("Resolved after 4m30s: ... (4 Alerts)", False),
         ("Resolved after 4m30s: ... (4 Alerts, 7 Runs)", False),
@@ -2390,7 +2547,7 @@ def test_an_alert_of_the_group_that_is_not_in_the_notification_cannot_be_listed(
     ],
 )
 def test_the_closing_comment_gives_a_duration_and_the_counts_the_incident_supports(text, ok):
-    assert (closing_problem(text, {4}, range(3, 5)) is None) is ok
+    assert (closing_problem(text, {4}, {4}) is None) is ok
 
 
 def test_the_counts_a_closing_comment_may_give_read_as_one_number_or_a_range():

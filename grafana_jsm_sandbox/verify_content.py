@@ -377,7 +377,8 @@ def sorted_problem(
 
 def closing_problem(text: str, alerts: Collection[int], runs: Collection[int]) -> str | None:
     """The closing comment reads `Resolved after <duration>: every Alert in <group> is resolved
-    (<n> Alerts, <m> Runs).` The counts must be among those the Incident supports."""
+    (<n> Alerts, <m> Runs).` The Alert count must be among those the Incident supports;
+    `runs` holds its exact lifecycle comment count, including the closing comment."""
     squashed = squash(text)
     lacks = []
     if not re.search(rf"resolved after\s+{DURATION}", squashed):
