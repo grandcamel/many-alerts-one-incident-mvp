@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from grafana_jsm_sandbox import configure, doctor
+from grafana_jsm_sandbox.investigation_contract import EVIDENCE_FILENAME, INVESTIGATION_MARKER
 
 REPOSITORY = Path(__file__).resolve().parent.parent
 ADMIN_REQUESTS = REPOSITORY / "docs" / "admin-requests.md"
@@ -183,3 +184,67 @@ def test_every_relative_link_lands(document):
             broken.append(f"{target}: no such heading")
 
     assert not broken, broken
+
+
+RUNBOOK = REPOSITORY / "docs" / "mvp-runbook.md"
+SETUP_SKILL = REPOSITORY / ".claude" / "skills" / "demo-setup" / "SKILL.md"
+
+
+@pytest.mark.parametrize("document", [RUNBOOK, SETUP_SKILL], ids=lambda path: path.name)
+def test_investigation_setup_keeps_the_viewer_token_manual_and_private(document):
+    body = " ".join(document.read_text().split())
+    for required in (
+        "service account with role Viewer",
+        "presenter's Admin access",
+        "mode-0600",
+        "DEMO_INVESTIGATION_ENABLED=true",
+        "DEMO_GRAFANA_VIEWER_TOKEN",
+        "docker compose up -d --force-recreate demo",
+        "/data/grafana",
+        "token rejected",
+    ):
+        assert required in body, required
+    assert "after `lgtm` is recreated" in body
+
+
+@pytest.mark.parametrize("document", [RUNBOOK, REPOSITORY / "README.md"])
+def test_investigation_docs_distinguish_evidence_and_presenter_access(document):
+    body = " ".join(document.read_text().split())
+    for required in (
+        "These queries authenticate with a Viewer token.",
+        "anonymous Admin",
+        "bypasses the Jira Forwarder",
+        "presenter's browser",
+        "zero, no data and unavailable",
+        "not an independent reachability check",
+        "current system",
+        "DEMO_INVESTIGATION_ENABLED=false",
+    ):
+        assert required in body, required
+
+
+@pytest.mark.parametrize("number", ["0002", "0003"])
+def test_the_access_adrs_describe_the_opt_in_grafana_credential(number):
+    [document] = (REPOSITORY / "docs" / "adr").glob(f"{number}-*.md")
+    body = " ".join(document.read_text().split())
+    for required in ("model credential", "Grafana Viewer credential", "Jira", "sentinel"):
+        assert required in body, required
+    assert "bypasses the Jira Forwarder" in body
+
+
+def test_the_runbook_uses_the_shared_evidence_name_and_exact_comment_marker():
+    body = RUNBOOK.read_text()
+    assert f"`{EVIDENCE_FILENAME}`" in body
+    assert f"`{INVESTIGATION_MARKER}`" in body
+
+
+def test_the_runbook_query_examples_use_only_frozen_subcommands_and_flags():
+    examples = re.findall(r"`(grafana-query (?:instant|range|get)\b[^`]+)`", RUNBOOK.read_text())
+    required = {"instant": "--query", "range": "--query", "get": "--path"}
+    found = set()
+    for example in examples:
+        words = example.split()
+        command = words[1]
+        found.add(command)
+        assert words == ["grafana-query", command, required[command], words[3]]
+    assert found == set(required)

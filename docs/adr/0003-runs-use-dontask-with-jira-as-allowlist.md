@@ -1,10 +1,10 @@
 # Runs use `--permission-mode dontAsk` with an allow list, not skip-permissions
 
-Every existing wrapper on this machine launches headless Claude with `--dangerously-skip-permissions`. We deliberately do not. A Run starts with `--permission-mode dontAsk` and `--allowedTools "Bash(jira-as *)" "Read"`, so any tool call outside that list is denied without a prompt and surfaces as a `permission_denied` event in the stream-json output. This is what lets the audience see a run that cannot do anything except talk to Jira.
+Every existing wrapper on this machine launches headless Claude with `--dangerously-skip-permissions`. We deliberately do not. A Run initially started with `--permission-mode dontAsk` and `--allowedTools "Bash(jira-as *)" "Read"`, so any tool call outside that list was denied without a prompt and surfaced as a `permission_denied` event in the stream-json output. The amendments below describe the scoped Read rule, local payload command and optional Grafana query command now available to a Run.
 
 ## Consequences
 
-- The purpose-built skill mounted into the Run must describe every operation in terms of `jira-as` invocations, because nothing else will execute.
+- The purpose-built Skill describes operations using the allowed commands: `jira-as`, `incident-payload` and, only when investigation is enabled, `grafana-query`.
 - The log formatter prints denials, so a misbehaving prompt is visible rather than silent.
 
 ## Amendments
@@ -18,3 +18,27 @@ Every existing wrapper on this machine launches headless Claude with `--dangerou
 **2026-09-23, the kept Transcript (demo-onboarding step 05).** Each Run's raw stream-json is now teed to `transcript.jsonl` in its own working directory, beside its Notification, so the rule above reaches it with no new rule and nothing outside the runs directory. A Run can therefore read its own Transcript and every earlier Run's still on the tmpfs. What those hold is what earlier Runs read through jira-as, said and were told: the Skill, Notifications, Jira data the account already reaches, and each Run's sentinel, which the Forwarder forgets when that Run ends (ADR 0002). The copy is raw by design, because it is what the trimmed and redacted log leaves out; the log itself is still redacted line by line as before. The files are not made read-only as the Skill is, so a Run could overwrite an earlier Transcript by a file jira-as writes where it is told to, as it could a Notification; the container log, not the file, stays the record of what a Run did.
 
 **2026-10-01, a local payload tool (the demo-run findings).** The allow list gains exactly one rule, `Bash(incident-payload *)`, and is now `Bash(jira-as *)`, `Bash(incident-payload *)` and `Read(//<runs directory>/**)`. In three rehearsal takes the cheapest model wrote the Description's ADF by hand inside a shell argument, closed it with the wrong brace six times, and created its Incident with the Description `Test`; the Skill's "do not retry" was not enough to stop it. A Run cannot hand jira-as a newline, so a bulleted Description has to be ADF, and building ADF is not a judgment. `incident-payload` builds it, with the summary, labels, fields, comment text, the new, repeat and resolved sort and the duration, and prints `jira-as` lines the Run runs as written; the Run keeps every judgment, from the Match to whether to create, update, close or skip. It joins the list because it adds no reach: it is this package's own module, run by the image's Python from a launcher in `/usr/local/bin`, both on the container's read-only root; it reads only `notification.json` in its working directory and the project facts the Receiver renders beside the Skill (`<runs directory>/.skill/project.json`, read-only like the Skill, and holding nothing the Skill does not already show), never a path from its command line; and it opens no socket, starts no process, writes no file and reads no environment variable, so it never holds the sentinel and cannot reach Jira. A printed line still goes through `Bash(jira-as *)`, the project allow list and the Forwarder like any other. `doctor --with-model` now asks for one harmless call of each rule, `incident-payload --help` among them.
+
+**2026-10-01, opt-in Grafana investigation.** Enabled Runs gain exactly
+`Bash(grafana-query *)` after `Bash(incident-payload *)`. The scoped Read rule stays as it is
+and already reaches `grafana-evidence.jsonl` in the Run's working directory. Disabled Runs
+keep the existing command and environment; both Skill renderings count only lifecycle
+comments at close, excluding bodies beginning with the exact `[grafana-investigation] ` marker
+after checking the raw list is complete. This marker is an accounting convention, not author
+authentication. No Python, curl or general-purpose shell permission is added.
+
+A Run has its model credential and, when enabled, a Grafana Viewer credential. Jira still
+uses the Forwarder's sentinel. `grafana-query` authenticates datasource-proxy GETs with the
+Viewer token and bypasses the Jira Forwarder. Arbitrary PromQL and discovery GETs are allowed;
+there is no query allow list, attempt budget, retry policy, response-size limit, sample cap or
+observation-window cap. The ten-second per-request elapsed timeout and compact Transcript
+summary are usability measures; the existing Run timeout still applies. Grafana still permits
+anonymous Admin, and presenter links open under the presenter's browser identity.
+
+Only a successful create and opening comment are followed by investigation. The Run chooses
+queries and judgments; `incident-payload investigate --key KEY --observation TEXT --interpretation
+TEXT --unknown TEXT` also reads the fixed evidence file and prints one Jira comment command,
+which the Run posts through its existing Jira path. It opens no socket and writes nothing.
+An investigation query, evidence-builder or post failure preserves a successful lifecycle's
+`ok: ` Finish. Disabled Skill rendering adds no investigation tool, query instructions or
+token facts; its close-count correction still applies when a prior marked comment remains.

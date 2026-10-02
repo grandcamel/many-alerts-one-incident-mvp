@@ -5,7 +5,8 @@ headless Claude Code Run that holds no Jira credential. One `docker compose up` 
 Grafana LGTM stack with one group of related alert rules, the small app those rules watch, the synthetic traffic
 whose absence fires it, and one hardened container whose main process receives the alert's
 Notification and starts a Run for it: Claude Code in print mode, allowed two tools (Bash for
-`jira-as` and `incident-payload` alone, and Read of one directory), following one Skill,
+`jira-as` and `incident-payload`, plus `grafana-query` when investigation is enabled, and Read
+of one directory), following one Skill,
 reaching Jira through a localhost Forwarder that swaps a per-Run sentinel
 for the real token. Stop the traffic and an Incident appears in the queue; start it again and
 the Incident is Completed, with the trend commented in between. It was built as a demo of what a
@@ -191,6 +192,61 @@ the tokens and admin requests only you can give, and asking before anything writ
     [the runbook](docs/demo-runbook.md) is how to present it. A Run that failed is in the log
     with a `[FAILED]` line, and [its Transcript](#fetching-a-transcript) has the rest.
 
+## Optional Grafana investigation
+
+Investigation is disabled by default. Only the Run that creates the Incident investigates,
+after the create and opening comment succeed, using current read-only PromQL and discovery
+GETs of its choosing through `grafana-query`. It adds one evidence comment to that same
+confirmed Incident. Updates, repeats, related-alert updates and resolved Notifications do not
+investigate; no Incident is created just to hold evidence. Query, builder and post failures
+leave a successful lifecycle Finish starting `ok: `.
+
+The four commented settings in `.env.example` are `DEMO_INVESTIGATION_ENABLED`,
+`DEMO_GRAFANA_URL`, `DEMO_GRAFANA_PRESENTER_URL` and `DEMO_GRAFANA_VIEWER_TOKEN`. Follow the
+[manual Viewer-token and opt-in steps](docs/mvp-runbook.md#optional-grafana-investigation), or
+ask [the setup skill](.claude/skills/demo-setup/SKILL.md). The operator creates a Viewer
+service account and token with their Admin access, enters it privately in the ignored
+mode-0600 configuration, then recreates demo. Recreate the account/token after `lgtm` is
+recreated; its Grafana data has no persistent volume. A 401 reads `token rejected`.
+
+The image defaults the internal URL to `http://lgtm:3000`; on a laptop the absent URL defaults
+to `http://localhost:3000`, with an explicit override when needed. The default presenter URL
+is `http://localhost:<GRAFANA_HOST_PORT>`, port `3000` when absent. Compose carries the resolved
+published port into the Receiver even for a shell override. Presenter links open in the
+presenter's browser under its identity, not the Run's token. Say, “These queries authenticate
+with a Viewer token.” Grafana still allows anonymous Admin, and query traffic bypasses the Jira Forwarder.
+A Run holds its model credential and, when enabled, a Grafana Viewer credential; Jira still
+uses the Forwarder's sentinel. The whole Grafana deployment is not read-only.
+
+The CLI offers `instant --query EXPR`, `range --query EXPR` and `get --path PATH`, with flags
+after the subcommand. It reads its environment only and appends full JSON evidence to
+`grafana-evidence.jsonl` in the Run's directory. There is no query allow list, attempt budget,
+retry policy, response-size limit, sample cap or observation-window cap. The ten-second
+per-request elapsed timeout and first-five-line Transcript summary keep it usable; the
+existing Run timeout still applies. The evidence comment starts with `[grafana-investigation] `
+and includes Observation, Interpretation, Unknown / next check and mechanical evidence with
+presenter links. Investigation comments do not count as lifecycle Runs at close or in verification.
+
+Show investigation on the live-fault path. All four rules derive from
+`http_server_duration_milliseconds_count` for `service_name="rolldice"`. The rule called a
+health probe is another view of completed requests, not an independent reachability check.
+Another query of that metric adds context, not independent corroboration. `checkout-outage`
+is a demonstration group label, not proof of a checkout service. Keep returned zero, no data and unavailable
+distinct: missing error series do not establish zero errors, fresh telemetry does not establish
+a healthy application, and absent traffic does not explain why it stopped. A replay investigates
+the current system with actual query times, not its historical window. Give metric/label names
+and query syntax, never an expected diagnosis. Do not claim measured time savings or autonomous
+root-cause discovery.
+
+The installed tool, Viewer access, proxy path and presenter Explore form on the pinned
+`grafana/otel-lgtm:0.33.0` still require a separately authorized free probe, without a model or
+Jira. Offline checks do not establish live acceptance. Before paid Runs or live Jira writes,
+settle the site/project/session, model, dollar cap, acceptable added delay and go/no-go. Then
+rehearse a faithful evidence comment on the same real Incident, the complete lifecycle and
+unavailable evidence; record added latency, queue delay and displayed model cost against a
+disabled baseline. If investigation misses or misstates evidence, privately set
+`DEMO_INVESTIGATION_ENABLED=false`, recreate demo and retain the existing lifecycle presentation.
+
 ## What the basic demo uses and what to ignore
 
 The Quickstart is chapter one, the basic demo. This repository also carries chapter two, work
@@ -199,11 +255,11 @@ in progress that the basic demo neither runs nor imports.
 | The basic demo uses | What it is |
 | --- | --- |
 | `docker-compose.yml`, `Dockerfile`, `docker/`, `grafana/provisioning/alerting/`, `certs/` | The stack, the demo image and its hardening, and the Alert |
-| `grafana_jsm_sandbox/`: `__main__`, `receiver`, `notification`, `forwarder`, `run_command`, `run_spawner`, `skill_template`, `log_formatter`, `nondumpable` | What runs in the demo container |
+| `grafana_jsm_sandbox/`: `__main__`, `receiver`, `notification`, `forwarder`, `run_command`, `run_spawner`, `skill_template`, `log_formatter`, `nondumpable`, `incident_payload`, `grafana_query`, `investigation_contract` | What runs in the demo container |
 | `grafana_jsm_sandbox/`: `demo_config`, `configure`, `doctor`, `verify`, `reset`, `replay` | The laptop commands, all reading `.env` |
 | `skill/incident-sync/` | The template of the Skill a Run follows |
 | `fixtures/` | The canned Notifications, recorded Transcripts, and a made-up Jira project for the tests |
-| `docs/demo-runbook.md`, `docs/admin-requests.md`, ADRs 0001 to 0005 | How to present it, what to ask for, and why it is built this way |
+| `docs/demo-runbook.md`, `docs/mvp-runbook.md`, `docs/admin-requests.md`, ADRs 0001 to 0005 | How to present it, opt into investigation, what to ask for, and why it is built this way |
 | The tests `python3 -m pytest --basic-demo` runs | Chapter one's tests, listed in `tests/conftest.py` |
 
 Everything else is chapter two's, and a newcomer to the basic demo can ignore it:
@@ -252,8 +308,9 @@ not published. None of it has changed how the basic demo runs.
   `JIRA_SITE_URL`, or a service account's scoped token with the API gateway's
   `https://api.atlassian.com/ex/jira/<cloudId>`. The Forwarder holds it, and no Run ever does.
 - **A Claude Code OAuth token**, from `claude setup-token` on a machine where Claude Code is
-  logged in, on a seat your Claude organisation allows it for. It is the one credential a Run
-  really holds. Each Run asks for Opus 5 unless `RUN_MODEL` in `.env` names another model.
+  logged in, on a seat your Claude organisation allows it for. It is the Run's model credential;
+  when investigation is enabled the Run also holds a Grafana Viewer credential. Each Run asks
+  for Opus 5 unless `RUN_MODEL` in `.env` names another model.
 - **Python 3.11 or newer** for the laptop commands (`configure`, `doctor`, `verify`, `reset`,
   `replay`). They are standard library only, so nothing is installed to run them; the tests
   need pytest and PyYAML (below). Check `python3 --version`: the `python3` macOS ships is 3.9,
@@ -492,8 +549,8 @@ The **skill** a Run follows, and the command line that starts one.
 
 [`skill/incident-sync/SKILL.md`](skill/incident-sync/SKILL.md) is the whole of what a Run knows
 about the project: the Fingerprint label format, the match JQL, the field mapping, the lifecycle
-rule, and every operation written as a `jira-as` or `incident-payload` invocation, because nothing
-else will execute. It
+rule, and every operation written as a `jira-as` or `incident-payload` invocation, plus
+`grafana-query` when investigation is enabled. It
 is short on purpose — it is meant to be read off a screen during the demo. What a Run reads is its
 rendering for `.env`'s project, which `skill_template.py` writes read-only into `.skill` in the runs
 directory at every Receiver start (`/app/runs/.skill` in the container, on its tmpfs). The
@@ -505,7 +562,9 @@ sets one (`--max-budget-usd`), `dontAsk`, an allow list of `Bash(jira-as *)`,
 `Bash(incident-payload *)` and `Read` scoped to
 one absolute directory, the runs directory, which holds the rendered Skill too
 (`Read(//app/runs/**)` in the container), stream-json with `--verbose`, and the rendered skill
-directory added so the Run can read it (ADR 0003). A bare `Read` was enough for a Run to read the
+directory added so the Run can read it (ADR 0003). When investigation is enabled,
+`Bash(grafana-query *)` is added after the payload rule; no general-purpose shell rule is added.
+A bare `Read` was enough for a Run to read the
 real Jira token out of the Receiver's `/proc` entry; the Receiver is also non-dumpable on Linux, so
 that entry is root's and no Run can open it by any route (ADR 0002). A process Docker execs into
 the container, any `docker compose exec`, still carries the token in its environment while it
@@ -664,7 +723,8 @@ image at a pinned tag, plus the distribution's Python 3 and TLS roots, and insta
 Code and `jira-as` at pinned versions, this package and the skill. It runs as `demo`, a non-root
 user the Dockerfile creates; the base image's own account and package managers are removed. There
 is no `sudo`, no `docker` CLI or group, no `gh`, `git`, `curl` or `jq` — `ls /usr/local/bin` inside
-the container is `claude`, `jira-as`, `node`, `nodejs`, `npm` and `npx`, and that is the answer to "what else can a
+the container includes `claude`, `jira-as`, `incident-payload`, `grafana-query`, `node`, `nodejs`,
+`npm` and `npx`, and that is the answer to "what else can a
 Run reach for". The entrypoint pre-accepts Claude Code's onboarding with Python's standard library
 and the healthcheck asks the health endpoint the same way, because nothing else is there to do it
 with. It mounts no Docker socket and holds no credential — those arrive at `docker compose up`
@@ -688,8 +748,9 @@ On a laptop behind an intercepting proxy, one variable names the corporate root 
 file under `certs/`, a directory git takes nothing from but the empty placeholder the build
 defaults to. Both images install it into their system trust store before any `npm` or `pip`
 install, and the demo image points Python, `requests`, pip and Claude Code at that store
-through the standard trust-store variables, which each Run inherits alongside its sentinel and
-nothing else new. The runbook has the presenter's steps.
+through the standard trust-store variables, which each Run inherits alongside its model
+credential, Jira sentinel and, when enabled, Grafana investigation settings. The runbook has
+the presenter's steps.
 
 ```bash
 EXTRA_CA_CERT=certs/corporate-root.crt docker compose up -d --build
@@ -932,7 +993,7 @@ DEMO_END_TO_END=1 python3 -m pytest tests/test_end_to_end.py
 The checks that need the container are opt-in the same way, and need nothing but `docker compose
 up -d` first. They ask the questions compose cannot answer on its own: whether the health
 endpoint answers the laptop and the `lgtm` container, whether the Receiver is really running
-as a user who is not root with the two executables a Run is allowed on its PATH, and whether
+as a user who is not root with the allowed executables on its PATH (including `grafana-query`), and whether
 `sudo`, `docker`, `gh`, `git`, `curl` and `jq` are really absent from it, along with any `docker`
 group, on a Node new enough to read the operating system trust store. When the shell's
 `EXTRA_CA_CERT` names a certificate, they also find its fingerprint in the container's bundle and

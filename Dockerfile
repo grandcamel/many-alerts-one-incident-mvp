@@ -59,7 +59,8 @@ RUN if [ -s /tmp/extra-ca.crt ]; then \
 # before the installs that need them: Python's ssl module and so the Forwarder's
 # urllib, the requests library jira-as uses, pip, curl-style clients, and Claude
 # Code, which documents NODE_EXTRA_CA_CERTS as its custom-CA setting. The Receiver
-# hands exactly these five on to each Run, and nothing else new (ADR 0002).
+# hands these five on to each Run alongside its model credential, Jira sentinel
+# and, when investigation is enabled, Grafana Viewer credential (ADR 0002).
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
     CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
@@ -75,7 +76,7 @@ RUN npm install -g --allow-scripts="@anthropic-ai/claude-code" \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 
-# The only thing a Run may execute that reaches anything. Pinned, because the skill
+# The command a Run uses to reach Jira. Pinned, because the skill
 # is written in its invocations and was verified against this version. Its own venv
 # keeps its dependencies out of the interpreter the Receiver runs on; the symlink puts
 # it on the PATH next to `claude`.
@@ -92,7 +93,7 @@ COPY --chown=demo:demo grafana_jsm_sandbox/ /app/grafana_jsm_sandbox/
 COPY --chown=demo:demo skill/ /app/skill/
 COPY --chown=demo:demo docker/entrypoint.sh /app/entrypoint.sh
 
-# The one other command a Run may execute (ADR 0003's 2026-10-01 amendment): a launcher for
+# The local payload command (ADR 0003's 2026-10-01 amendment): a launcher for
 # this package's `incident_payload`, which prints the jira-as lines a Run would otherwise build
 # by hand, from the Notification and the project's facts beside the rendered Skill. It reaches
 # nothing, and like everything here it sits on the read-only root, so no Run can change it.
@@ -101,11 +102,17 @@ COPY --chown=demo:demo docker/entrypoint.sh /app/entrypoint.sh
 # call fails with "permission denied". `--chmod` is BuildKit's, which compose uses.
 COPY --chmod=0755 docker/incident-payload /usr/local/bin/incident-payload
 
+# The opt-in investigation command uses the Run's Grafana Viewer credential for
+# datasource-proxy GETs, bypassing the Jira Forwarder. Its launcher uses the same
+# isolated Python and read-only package as incident-payload, with no extra dependency.
+COPY --chmod=0755 docker/grafana-query /usr/local/bin/grafana-query
+
 # Where this container keeps the two directories the Receiver is told about. The
 # credentials are not here and are not in the image: compose hands them in from an
 # env file that git and the build context both refuse.
 ENV SKILL_DIRECTORY=/app/skill \
     RUNS_DIRECTORY=/app/runs \
+    DEMO_GRAFANA_URL=http://lgtm:3000 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 

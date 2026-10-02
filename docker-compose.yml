@@ -59,9 +59,14 @@ services:
       args:
         EXTRA_CA_CERT: ${EXTRA_CA_CERT:-certs/NO_EXTRA_CERTS}
     image: grafana-jsm-sandbox:latest
-    # The Jira credential and the Anthropic token, from a file git never takes.
+    # The Jira and model credentials and optional Grafana Viewer token, from a
+    # file git never takes.
     env_file:
       - .env
+    environment:
+      # Carry the resolved published port even when a shell override wins over
+      # .env, so the Receiver's default presenter links reach the same Grafana.
+      GRAFANA_HOST_PORT: ${GRAFANA_HOST_PORT:-3000}
     ports:
       # The Receiver, so the replay script can post from the laptop. Grafana
       # reaches it on the network instead, at http://demo:8080/notification.
