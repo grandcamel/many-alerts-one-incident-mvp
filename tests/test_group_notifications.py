@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 
 import pytest
 import yaml
@@ -215,7 +216,7 @@ CREATE = "incident-payload create --component '<service>'"
 UPDATE = "incident-payload update --key <key> --labels "
 CLOSE = "incident-payload close --key <key> --labels "
 SERVER_TIME = "jira-as -o json api call getServerInfo"
-COMMENTS = "jira-as collaborate comment list <key> --limit 1 -o json"
+COMMENTS = "jira-as collaborate comment list <key> --order asc --limit 200 -o json"
 TRANSITIONS = "jira-as lifecycle transitions <key> -o json"
 TRANSITION = "jira-as lifecycle transition <key> --id <id>"
 COMPLETE = "jira-as lifecycle transition <key> --id <id> --resolution Done"
@@ -343,3 +344,19 @@ def test_every_command_the_skill_spells_out_is_one_line_the_allow_list_matches(c
     assert command.startswith(("jira-as ", "incident-payload "))
     assert "$'" not in command and "\\" not in command and "\n" not in command
     assert command.count("'") % 2 == 0, "an unbalanced quote would run on to the next line"
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_opening_and_investigation_then_close_counts_two_lifecycle_runs(tmp_path, enabled):
+    from grafana_jsm_sandbox.investigation_contract import is_investigation
+
+    skill = render(TEMPLATE, PROJECT, investigation_enabled=enabled)
+    assert COMMENTS in skill
+    _, _, opening = run_lines(run_on(tmp_path, FIRING, "create"))
+    bodies = [shlex.split(opening)[-1], "[grafana-investigation] New: none; fp-deadbeef"]
+    assert len(bodies) == 2
+    prior_lifecycle = sum(not is_investigation(body) for body in bodies)
+    *_, closing = run_lines(run_on(tmp_path, RESOLVED,
+                                *against_match("close", "--runs", str(prior_lifecycle),
+                                               labels=AFTER_CREATE)))
+    assert "2 Runs" in closing

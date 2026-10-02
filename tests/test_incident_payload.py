@@ -885,6 +885,9 @@ def test_it_imports_nothing_that_could_reach_out():
         "__future__",
         "argparse",
         "json",
+        "math",
+        "urllib.parse",
+        "grafana_jsm_sandbox.investigation_contract",
         "re",
         "sys",
         "unicodedata",
@@ -1016,3 +1019,323 @@ def test_the_printed_create_carries_the_content_the_forwarder_asks_of_a_first_cr
     assert sent[0][3] == body
     assert gate.handle("POST", "/rest/api/3/issue", headers, body)[0] == 409
     assert len(sent) == 1
+
+
+# --- Investigation evidence is mechanical, judgments stay with the Run ---
+
+
+def evidence_record(command="range", status="ok", value="0", error=None, query=None):
+    from urllib.parse import quote
+
+    if query is None:
+        query = r'''sum(rate(metric_count{service_name="rolldice",path=~"a\\b.*",tag="$'`{}"}[5m]))'''
+    start, end = "2026-10-01T14:00:00.000Z", "2026-10-01T14:10:00.000Z"
+    if command == "instant":
+        end = start
+    panes = {"A": {"datasource": "prometheus", "queries": [{"refId": "A", "expr": query,
+             "instant": command == "instant", "range": command == "range"}],
+             "range": {"from": "1790863200000", "to": "1790863800000"}}}
+    return {
+        "schema_version": 1, "command": command,
+        "query": None if command == "get" else query, "datasource": "prometheus",
+        "path": {"get": "/api/v1/labels", "instant": "/api/v1/query",
+                 "range": "/api/v1/query_range"}[command],
+        "parameters": ([["match[]", query]] if command == "get" else
+                       [["query", query], ["time", "1790863200"]] if command == "instant" else
+                       [["query", query], ["start", "1790863200"], ["end", "1790863800"],
+                        ["step", "10"]]),
+        "window": {"start": None if command == "get" else start,
+                   "end": None if command == "get" else end,
+                   "step_seconds": 10 if command == "range" else None},
+        "retrieved_at": end, "status": status, "error": error,
+        "sample_summary": {
+            "result_type": None if status == "unavailable" else "vector",
+            "series_count": 1 if status == "ok" else 0,
+            "sample_count": 1 if status == "ok" else 0,
+            "unmodelled_count": 0, "discovery_items": None,
+            "series": [{"labels": {"service_name": "rolldice"}, "count": 1,
+                        "latest": {"timestamp": 1790863800, "value": value},
+                        "min": value if value == "0" or value == "2" else None,
+                        "max": value if value == "0" or value == "2" else None}] if status == "ok" else [],
+        },
+        "presenter_link": "http://localhost:3000/explore?schemaVersion=1&panes=" + quote(
+            json.dumps(panes, separators=(",", ":")), safe=""),
+        "response": None if status == "unavailable" else {
+            "status": "success", "data": {"resultType": "vector", "result": [
+                {"metric": {"service_name": "rolldice"}, "value": [1790863800, value]}
+            ] if status == "ok" else []}},
+    }
+
+
+def investigation_argv():
+    return ["investigate", "--key", "SANDBOX-7", "--observation", "zero 'requests'\nseen",
+            "--interpretation", 'uncertain "$why"', "--unknown", "check `traffic`\\source"]
+
+
+def investigate_on(tmp_path, records):
+    from grafana_jsm_sandbox.investigation_contract import EVIDENCE_FILENAME
+
+    working = run_directory(tmp_path, canned(FIRING))
+    if records is not None:
+        (working / EVIDENCE_FILENAME).write_text(
+            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    [command] = printed(investigation_argv(), working)
+    return command, working
+
+
+def investigation_body(command):
+    adf = json.loads(argument(command, "-b"))
+    return "".join(node["text"] for node in adf["content"][0]["content"])
+
+
+@pytest.mark.parametrize("query", [
+    'http_server_duration_milliseconds_count{service_name="rolldice"}',
+    r'''sum(rate(metric_count{service_name="rolldice",path=~"a\\b.*",tag="$'`{}"}[5m]))''',
+])
+def test_investigation_punctuation_link_and_real_jira_conversion(tmp_path, query):
+    from urllib.parse import parse_qs, urlsplit
+
+    jira_as = pytest.importorskip("jira_as")
+    from as_engine.index import ProductIndexes
+    from as_engine.surface import Surface
+    from as_engine.transport import Response
+    from jira_as.compat.client import GenericClient
+    from jira_as.compat.implementations import _add_comment_impl
+    from jira_as.compat.richtext import richtext
+
+    from grafana_jsm_sandbox.investigation_contract import INVESTIGATION_MARKER
+
+    record = evidence_record(query=query)
+    command, working = investigate_on(tmp_path, [record])
+    assert "\\" not in command and "\n" not in command and "$'" not in command
+    assert shlex.split(command)[:5] == ["jira-as", "collaborate", "comment", "add", "SANDBOX-7"]
+    assert argument(command, "--format") == "adf"
+    body = argument(command, "-b")
+    assert body == json.dumps(json.loads(body), ensure_ascii=False, separators=(",", ":"))
+    converted = richtext(body, "adf")
+    captured = []
+
+    class Capture:
+        def call(self, operation, parameters, payload, **options):
+            assert operation.operationId == "addComment"
+            assert parameters["issueIdOrKey"] == "SANDBOX-7"
+            captured.append(payload["body"])
+            return Response(201, {"id": "1", "body": payload["body"]})
+
+        def close(self):
+            pass
+
+    surface = Surface(ProductIndexes(Path(jira_as.__file__).parent / "_generated"),
+                      lambda document, index: Capture())
+    surface.scope_allowlist = ("SANDBOX",)
+    client = GenericClient(surface=surface)
+    _add_comment_impl("SANDBOX-7", body, body_format=argument(command, "--format"), client=client)
+    [adf] = captured
+    assert adf == converted
+    assert adf["type"] == "doc" and adf["version"] == 1
+    assert len(adf["content"]) == 1 and adf["content"][0]["type"] == "paragraph"
+    nodes = adf["content"][0]["content"]
+    assert nodes[0] == {"type": "text", "text": INVESTIGATION_MARKER}
+    assert [node["text"] for node in nodes if node.get("marks") == [{"type": "strong"}]] == [
+        "Observation:", "Interpretation:", "Unknown / next check:", "Evidence:"]
+    assert [node["text"] for node in nodes if node.get("marks") == [{"type": "code"}]] == [
+        plain(query)]
+    rendered = "".join(node["text"] for node in nodes)
+    assert rendered == (
+        "[grafana-investigation] Observation: zero ’requests’ seen | Interpretation: "
+        "uncertain ”＄why” | Unknown / next check: check ˋtrafficˋ⧵source | Evidence: "
+        f"{plain(query)} (prometheus, 2026-10-01T14:00:00.000Z..2026-10-01T14:10:00.000Z, "
+        "step 10s; retrieved 2026-10-01T14:10:00.000Z): observed zero Open in Grafana")
+    links = [mark["attrs"]["href"] for node in nodes for mark in node.get("marks", [])
+             if mark["type"] == "link"]
+    assert links == [record["presenter_link"]]
+    assert [node["text"] for node in nodes if any(
+        mark["type"] == "link" for mark in node.get("marks", []))] == ["Open in Grafana"]
+    panes = json.loads(parse_qs(urlsplit(links[0]).query)["panes"][0])
+    assert panes["A"]["queries"][0]["expr"] == record["query"]
+    assert json.loads((working / "grafana-evidence.jsonl").read_text()) == record
+
+
+@pytest.mark.parametrize("status, expected", [("empty", "no data"), ("ok", "observed zero")])
+def test_investigation_includes_success_and_failures_in_append_order(tmp_path, status, expected):
+    failure = evidence_record(status="unavailable", error={
+        "kind": "token_rejected", "message": "token rejected", "http_status": 401})
+    success = evidence_record(status=status)
+    command, _ = investigate_on(tmp_path, [failure, success])
+    body = investigation_body(command)
+    assert "Observation: zero ’requests’ seen" in body
+    assert body.index("unavailable: token rejected") < body.index(expected)
+    assert " ; " in body and body.count("Open in Grafana") == 2
+
+
+@pytest.mark.parametrize("records, reason", [
+    (None, "no query evidence recorded"), ([], "no query evidence recorded"),
+    ([{"schema_version": 1}], "evidence file unreadable"),
+    ([evidence_record(), {"schema_version": 2}], "evidence file unreadable"),
+])
+def test_missing_empty_or_invalid_evidence_overrides_judgments(tmp_path, records, reason):
+    command, _ = investigate_on(tmp_path, records)
+    from jira_as.compat.richtext import richtext
+
+    adf = richtext(argument(command, "-b"), "adf")
+    nodes = adf["content"][0]["content"]
+    assert nodes[0] == {"type": "text", "text": "[grafana-investigation] "}
+    assert [node["text"] for node in nodes if node.get("marks") == [{"type": "strong"}]] == [
+        "Observation:", "Interpretation:", "Unknown / next check:", "Evidence:"]
+    assert all(mark["type"] == "strong" for node in nodes for mark in node.get("marks", []))
+    assert investigation_body(command) == (
+        "[grafana-investigation] Observation: Evidence unavailable | Interpretation: "
+        "No conclusion from Grafana | Unknown / next check: check ˋtrafficˋ⧵source | "
+        f"Evidence: unavailable: {reason}")
+
+
+def test_all_failed_evidence_deduplicates_reasons_in_first_seen_order(tmp_path):
+    records = [evidence_record(status="unavailable", error={
+        "kind": "unreachable", "message": message, "http_status": None})
+        for message in ["unreachable", "token rejected", "unreachable"]]
+    command, _ = investigate_on(tmp_path, records)
+    assert investigation_body(command).endswith("Evidence: unavailable: unreachable; token rejected")
+    assert "observed zero" not in command
+
+
+@pytest.mark.parametrize("raw", [b'{bad json}\n', b'\xff', b'\n', b'null\n'])
+def test_unreadable_jsonl_is_unavailable_and_exits_zero(tmp_path, raw, capsys):
+    from grafana_jsm_sandbox.investigation_contract import EVIDENCE_FILENAME
+
+    _, working = investigate_on(tmp_path, None)
+    (working / EVIDENCE_FILENAME).write_bytes(raw)
+    assert main(investigation_argv(), working) == 0
+    output = capsys.readouterr()
+    assert output.err == "" and output.out.count("\n") == 1
+    assert "evidence file unreadable" in output.out
+
+
+def test_unreadable_evidence_path_is_unavailable(tmp_path):
+    _, working = investigate_on(tmp_path, None)
+    (working / "grafana-evidence.jsonl").mkdir()
+    assert "evidence file unreadable" in printed(investigation_argv(), working)[0]
+
+
+@pytest.mark.parametrize("command", ["instant", "get"])
+def test_investigation_instant_and_discovery_wording(tmp_path, command):
+    record = evidence_record(command=command)
+    if command == "get":
+        record["sample_summary"].update(result_type="discovery", series_count=0,
+                                        sample_count=0, series=[], discovery_items=3)
+    line, _ = investigate_on(tmp_path, [record])
+    body = investigation_body(line)
+    assert "step " not in body
+    if command == "instant":
+        assert "at 2026-10-01T14:00:00.000Z; retrieved" in body
+    else:
+        assert "GET /api/v1/labels?match%5B%5D=" in body
+        assert "discovery: 3 items" in body
+        assert "prometheus; retrieved" in body
+
+
+@pytest.mark.parametrize("value", ["2", "NaN", "+Inf"])
+def test_nonzero_and_nonfinite_data_never_become_observed_zero(tmp_path, value):
+    record = evidence_record(value=value)
+    if value != "2":
+        record["sample_summary"]["series"][0].update(min=None, max=None)
+    record["presenter_link"] = None
+    command, _ = investigate_on(tmp_path, [record])
+    assert "observed zero" not in command
+    assert f"latest {value} at " in command and "no link" in command
+    from jira_as.compat.richtext import richtext
+
+    nodes = richtext(argument(command, "-b"), "adf")["content"][0]["content"]
+    assert nodes[-1] == {"type": "text", "text": "no link"}
+    assert not any(mark["type"] == "link" for node in nodes for mark in node.get("marks", []))
+
+
+def test_unmodelled_data_is_not_zero_or_absent(tmp_path):
+    record = evidence_record()
+    record["sample_summary"].update(unmodelled_count=1)
+    command, _ = investigate_on(tmp_path, [record])
+    assert "observed zero" not in command and "unmodelled samples=1" in command
+
+
+@pytest.mark.parametrize("flag", ["--key", "--observation", "--interpretation", "--unknown"])
+def test_investigation_requires_all_four_flags(tmp_path, flag, capsys):
+    _, working = investigate_on(tmp_path, None)
+    argv = investigation_argv()
+    index = argv.index(flag)
+    del argv[index:index + 2]
+    assert main(argv, working) == 2
+    assert capsys.readouterr().err.startswith("incident-payload: error:")
+
+
+def test_investigation_rejects_wrong_project_key(tmp_path, capsys):
+    _, working = investigate_on(tmp_path, None)
+    argv = investigation_argv()
+    argv[2] = "OTHER-7"
+    assert main(argv, working) == 2
+    assert "not an issue of SANDBOX" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("field,value", [
+    ("schema_version", True), ("schema_version", 2), ("command", "write"),
+    ("query", None), ("datasource", 3), ("parameters", [["a"]]),
+    ("window", {"start": None, "end": None, "step_seconds": None}),
+    ("retrieved_at", "not a time"), ("status", "zero"),
+    ("error", {"kind": "timeout", "message": "timeout after 10s", "http_status": None}),
+    ("sample_summary", {"series": []}), ("presenter_link", "https://example.test/a b"),
+])
+def test_invalid_schema_invalidates_even_an_earlier_success(tmp_path, field, value):
+    invalid = evidence_record()
+    invalid[field] = value
+    line, _ = investigate_on(tmp_path, [evidence_record(), invalid])
+    assert "Evidence unavailable" in line and "evidence file unreadable" in line
+    assert "observed zero" not in line
+
+
+def test_mixed_nonfinite_and_zero_bounds_never_report_observed_zero(tmp_path):
+    record = evidence_record()
+    record["response"]["data"].update(resultType="matrix", result=[
+        {"metric": {}, "values": [[1, "NaN"], [2, "0"]]}])
+    record["sample_summary"].update(sample_count=2, result_type="matrix")
+    record["sample_summary"]["series"][0]["count"] = 2
+    line, _ = investigate_on(tmp_path, [record])
+    assert "observed zero" not in line and "2 samples" in line
+
+
+@pytest.mark.parametrize("kind", ["scalar", "string"])
+def test_a_scalar_zero_is_an_observed_sample(tmp_path, kind):
+    record = evidence_record()
+    record["response"]["data"].update(resultType=kind, result=[1790863800, "0"])
+    record["sample_summary"]["result_type"] = kind
+    line, _ = investigate_on(tmp_path, [record])
+    assert "observed zero" in line
+
+
+def test_all_series_contribute_to_zero_classification_and_first_series_display(tmp_path):
+    record = evidence_record(value="2")
+    summary = record["sample_summary"]
+    summary.update(series_count=2, sample_count=2)
+    summary["series"].append({"labels": {}, "count": 1, "latest": {"timestamp": 1, "value": "0"},
+                              "min": "0", "max": "0"})
+    record["response"]["data"]["result"].append({"metric": {}, "value": [1, "0"]})
+    line, _ = investigate_on(tmp_path, [record])
+    assert "2 series, 2 samples; latest 2 at " in line
+    assert "; min 2, max 2; +1 more series" in line and "observed zero" not in line
+
+
+def test_investigation_still_validates_notification_and_facts(tmp_path, capsys):
+    _, working = investigate_on(tmp_path, None)
+    (working / NOTIFICATION_FILENAME).write_text('{}')
+    assert main(investigation_argv(), working) == 2
+    assert "has no alerts" in capsys.readouterr().err
+    (working / NOTIFICATION_FILENAME).write_text(json.dumps(canned(FIRING)))
+    facts_path = working.parent / RENDERED_SKILL / FACTS_FILE
+    facts_path.chmod(0o600)
+    facts_path.write_text('{}')
+    assert main(investigation_argv(), working) == 2
+    assert "project facts" in capsys.readouterr().err
+
+
+def test_close_help_names_prior_lifecycle_comments(capsys):
+    with pytest.raises(SystemExit) as exit:
+        main(["close", "--help"])
+    assert exit.value.code == 0
+    assert "prior lifecycle comments" in capsys.readouterr().out

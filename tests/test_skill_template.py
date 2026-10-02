@@ -270,7 +270,7 @@ def test_the_skill_asks_for_no_adf_and_no_hand_built_json():
         skill = render(TEMPLATE, project)
 
         assert '{"type":"doc"' not in skill
-        assert "ADF" not in skill
+        assert "ADF" not in skill.split("## Step 2c")[0]
         assert "--custom-fields" not in skill and "--description" not in skill
         assert "`jira-as issue create" not in skill
         assert not any(command.startswith("jira-as issue create") for command in commands(skill))
@@ -422,20 +422,21 @@ def test_alert_text_quotes_are_replaced_without_shell_escape_syntax():
 def test_closing_reads_comments_to_count_runs():
     close = section(render(TEMPLATE, BARE), "Step 2c")
 
-    assert "one per comment on the Incident, the opening one included" in close
+    assert "one per prior lifecycle comment, the opening one included" in close
     assert "--runs <count>" in close and "counts this Run as one more" in close
 
 
-def test_the_run_count_is_the_total_of_a_one_comment_list_not_every_comment():
-    """`comment list` returns up to 50 comments, each with author objects and an ADF body, about
-    2 KB a Run: a long take would grow it toward Claude Code's "Output too large", and past 50
-    the count of comments read would be wrong. `total` is right however many there are."""
-    close = " ".join(section(render(TEMPLATE, BARE), "Step 2c").split())
-
-    assert "jira-as collaborate comment list <key> --limit 1 -o json" in close
-    assert "jira-as collaborate comment list <key> -o json" not in close
-    assert "The count is the `total` of the comment list" in close
-    assert "that `total` as the count" in close
+@pytest.mark.parametrize("enabled", [False, True])
+def test_closing_counts_only_lifecycle_bodies_after_verifying_raw_completeness(enabled):
+    close = " ".join(section(render(TEMPLATE, BARE, investigation_enabled=enabled), "Step 2c").split())
+    assert "jira-as collaborate comment list <key> --order asc --limit 200 -o json" in close
+    assert "--order asc --limit <total> -o json" in close
+    assert "returned comment count equals the raw `total`" in close
+    assert "Do not guess from a partial list" in close
+    assert "[grafana-investigation] " in close
+    assert "case-sensitive, including the trailing space" in close
+    assert "Human and other unmarked comments count" in close
+    assert "--runs <count>" in close
 
 
 def test_a_successful_label_add_is_not_rechecked_or_retried():
@@ -693,3 +694,67 @@ def test_the_skill_renders_custom_statuses_and_leaves_human_owned_statuses():
     assert "jira-as lifecycle transition <key> --id <id> --resolution Done" in skill
     assert "whose `to.name` is the target" in skill
     assert "post-function may set the resolution instead" in skill
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_render_and_materialize_select_investigation_without_changing_project_facts(tmp_path, enabled):
+    target = materialize(TEMPLATE_DIRECTORY, tmp_path / ".skill", SESSIONED,
+                         investigation_enabled=enabled)
+    skill = render(TEMPLATE, SESSIONED, investigation_enabled=enabled)
+    assert (target / SKILL_FILE).read_text() == skill
+    assert Facts.from_json((target / FACTS_FILE).read_text()) == facts(SESSIONED)
+    assert ("grafana-query" in skill) == enabled
+    assert ("Viewer token" in skill) == enabled
+    assert "<!--" not in skill
+    assert "{{" not in skill
+
+
+def test_enabled_investigation_is_create_only_after_create_and_opening_succeed():
+    skill = render(TEMPLATE, SESSIONED, investigation_enabled=True)
+    create = section(skill, "Step 2a")
+    assert "After the create AND opening comment succeed" in create
+    assert "incident-payload investigate --key <key> --observation" in create
+    assert "once" in create and "current telemetry" in create
+    assert "Updates, repeats, related-alert updates, resolved Notifications" in create
+    assert "never create an Incident just to hold an investigation" in create
+    for heading in ("Step 2b", "Step 2c"):
+        assert "grafana-query" not in section(skill, heading)
+    for fact in ("prometheus", "http_server_duration_milliseconds_count", "service_name",
+                 "http_status_code", "/api/v1/labels", "/api/v1/series", "/api/v1/metadata",
+                 "now-10m", "10s", "grafana-evidence.jsonl"):
+        assert fact in create
+    assert "no required expression, expected result or diagnosis" in create
+    assert "exactly as printed" in create
+    assert "`--format adf`" in create
+    assert "code-marked display queries" in create
+    assert "explicit link marks" in create
+    assert "investigate` exception" in skill
+
+
+def test_enabled_finish_preserves_lifecycle_success_despite_investigation_failure():
+    skill = render(TEMPLATE, SESSIONED, investigation_enabled=True)
+    finish = " ".join(skill.split("## Finish", 1)[1].split())
+    assert "irrespective of query, evidence-builder or investigation-post failure" in finish
+    for text in ("; investigation recorded", "; investigation unavailable (<reason>)",
+                 "; unavailable-evidence comment recorded",
+                 "; investigation comment could not be posted"):
+        assert text in finish
+    assert "at least one successful record" in finish and "no-data" in finish
+    assert "never claim a failed post was recorded" in finish
+    assert "lifecycle failure still starts `failed: ` and does not investigate" in finish
+
+
+def test_disabled_rendering_preserves_baseline_except_close_accounting():
+    import subprocess
+
+    baseline = subprocess.run(["git", "show", "ef17011:skill/incident-sync/SKILL.md"],
+                              check=True, capture_output=True, text=True).stdout
+    previous = render(baseline, SESSIONED)
+    current = render(TEMPLATE, SESSIONED)
+    before, after = "## Step 2c", "## Moving an Incident"
+    assert previous.split(before)[0] == current.split(before)[0]
+    assert previous.split(after)[1] == current.split(after)[1]
+    closing_command = "```bash\nincident-payload close"
+    previous_close = previous.split(before, 1)[1].split(after, 1)[0]
+    current_close = current.split(before, 1)[1].split(after, 1)[0]
+    assert previous_close.split(closing_command, 1)[1] == current_close.split(closing_command, 1)[1]
