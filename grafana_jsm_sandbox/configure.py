@@ -21,6 +21,13 @@ admin's it names the request in `docs/admin-requests.md`. The option values and
 resolution are checked, not written. Status roles are configurable: this proposes
 names from the Incident workflow and writes them with the field ids.
 
+The presenter's queue is the one named `Incidents`. When no queue has that name it lists the
+candidates, with their ids and addresses, and takes one only when exactly one queue's JQL shows
+the project's open Incidents: the project, `issuetype = Incident` and `resolution = Unresolved`,
+and nothing else. Otherwise it leaves `DEMO_QUEUE_URL` as it is, says to set it by hand, and
+checks what is there: the address must be a queue of this project's service desk, and its JQL
+must filter on the resolution, or a completed Incident stays in it.
+
 By default it prints the `.env` changes it would make. `--write` makes them in
 place: an existing line keeps its place, its `export ` and its inline comment,
 a key `.env` lacks is appended under a marked block, and no other line is
@@ -189,6 +196,27 @@ UNRESOLVED = re.compile(r"(?i)\bresolution\s*(?:=|\bis\b)\s*(?:unresolved|empty|
 """What a queue's JQL must say for a completed Incident to leave it (ADR 0004): JQL spells
 the unresolved `resolution = Unresolved`, `resolution is EMPTY` or `resolution = EMPTY`."""
 
+QUEUE_ADDRESS = re.compile(
+    r"/jira/servicedesk/projects/(?P<key>[^/]+)/queues/custom/(?P<id>\d+)(?:/|$)"
+)
+"""The path of a custom queue's address in the browser: the project's key and the queue's id."""
+
+JOINT = re.compile(r"\s+(?:and|or|order\s+by)\s+|\s*&&\s*|\s*\|\|\s*", re.IGNORECASE)
+"""What joins the clauses of a JQL query, or ends them at its `ORDER BY`."""
+
+QUOTED = re.compile(r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'")
+INNERMOST = re.compile(r"\([^()]*\)")
+"""A quoted string, and a parenthesised group with none inside it: both are blanked before JQL is
+split, so an `AND` inside either is not a joint."""
+
+INCIDENT_TYPE = re.compile(
+    r"""(?i)(?:issuetype|type)\s*(?:=\s*|in\s*\(\s*)(["']?)Incident\1\s*\)?"""
+)
+"""A queue's `issuetype = Incident` clause, or `type`, `in (Incident)`, quoted or not."""
+
+MENTIONS_INCIDENTS = re.compile(r"(?i)\bincidents?\b")
+"""A queue whose JQL says Incident anywhere is worth listing, even when it is not exactly right."""
+
 COMPONENT = "rolldice"
 """The Alert's `service` label (grafana/provisioning/alerting/alert-rule.yaml), which a Run sets
 as the Component only when the project has one of that exact name."""
@@ -281,6 +309,10 @@ class Discovery:
 
     checks: list[Check] = field(default_factory=list)
     facts: dict[str, str] = field(default_factory=dict)
+    confirmed: set[str] = field(default_factory=set)
+    """Keys `.env` holds a value for that the project confirmed as it stands, so there is
+    nothing to write and nothing left unchecked: a hand-set queue address that is the
+    project's own queue."""
 
     def add(self, level: str, name: str, message: str, *ask: str) -> None:
         self.checks.append(Check(level, name, message, ask))
@@ -288,7 +320,9 @@ class Discovery:
     @property
     def unchecked(self) -> list[str]:
         """The `.env` keys the project did not answer for, which `.env` cannot be held to."""
-        return [name for name in FACT_VARIABLES if name not in self.facts]
+        return [
+            name for name in FACT_VARIABLES if name not in self.facts and name not in self.confirmed
+        ]
 
     @property
     def blocker(self) -> Check | None:
@@ -346,9 +380,16 @@ class Change:
 
 
 def discover(
-    project_key: str, site_url: str, jira_as: JiraAs, project: DemoProject | None = None
+    project_key: str,
+    site_url: str,
+    jira_as: JiraAs,
+    project: DemoProject | None = None,
+    queue_url: str = "",
 ) -> Discovery:
     """Ask the project everything the demo relies on, and nothing that changes it.
+
+    `queue_url` is the address `.env` holds for the queue now, which is checked when
+    no queue is found to replace it.
 
     The project comes first: when Jira cannot find it, or refuses the credential,
     nothing else it could say would help. Every later check stands alone, so one
@@ -366,7 +407,9 @@ def discover(
         attempt(found, "create screen", check_fields, jira_as, project_key, incident, has_component)
     attempt(found, "statuses", check_statuses, jira_as, project_key, incident, project)
     attempt(found, "resolution", check_resolution, jira_as)
-    attempt(found, "service desk", check_queue, jira_as, project_key, project_id, site_url)
+    attempt(
+        found, "service desk", check_queue, jira_as, project_key, project_id, site_url, queue_url
+    )
     if component is not None:
         found.checks.append(component[0])
     attempt(found, "dedicated", check_dedicated, jira_as, project_key)
@@ -813,13 +856,23 @@ def check_resolution(found: Discovery, jira_as: JiraAs) -> None:
 
 
 def check_queue(
-    found: Discovery, jira_as: JiraAs, key: str, project_id: str, site_url: str
+    found: Discovery,
+    jira_as: JiraAs,
+    key: str,
+    project_id: str,
+    site_url: str,
+    hand_set: str = "",
 ) -> None:
     """The service desk behind the project, and the address of its Incidents queue.
 
     The address is the one a browser shows for the queue, built from the queue's id as
     the service desk API gives it. That the API's id is the address bar's is what the
     audit could not verify offline; a queue that opens elsewhere is fixed by hand.
+
+    The queue is the one named `Incidents`. When no queue has that name, or several do,
+    the one whose JQL shows the project's open Incidents is taken, but only when exactly
+    one does (`shows_open_incidents`). Otherwise `DEMO_QUEUE_URL` is left as it is, the
+    candidates are listed, and `hand_set`, what `.env` holds now, is checked instead.
     """
     desk = find_service_desk(jira_as, key, project_id)
     if desk is None:
@@ -840,20 +893,21 @@ def check_queue(
         )
     ]
     named = [queue for queue in queues if queue.get("name") == QUEUE]
-    if len(named) != 1:
-        found.add(
-            WARN,
-            "queue",
-            f"{len(named) or 'no'} queue(s) named {QUEUE} on {key}, so {QUEUE_URL_VARIABLE} is "
-            "left as it is; open the queue that shows open Incidents and copy its address there",
-        )
-        return
+    shown = [
+        queue
+        for queue in named or queues
+        if shows_open_incidents(str(queue.get("jql") or ""), key, project_id)
+    ]
+    chosen = named[0] if len(named) == 1 else shown[0] if len(shown) == 1 else None
     try:
         site = browser_site(jira_as, site_url)
     except JiraRefused as failure:
         site, why = "", str(failure)
     else:
         why = "the site named no base URL"
+    if chosen is None:
+        left_as_it_is(found, key, project_id, queues, named, shown, site, why, hand_set)
+        return
     if not site:
         found.add(
             WARN,
@@ -862,18 +916,231 @@ def check_queue(
             "it is; open the queue and copy its address there",
         )
         return
-    url = f"{site}/jira/servicedesk/projects/{key}/queues/custom/{named[0].get('id')}"
+    url = queue_address(site, key, chosen)
     found.facts[QUEUE_URL_VARIABLE] = url
-    jql = str(named[0].get("jql") or "")
-    if UNRESOLVED.search(jql):
-        found.add(OK, "queue", url)
-    else:
+    if hand_set and hand_set != url:
+        wrong = set_queue_check(hand_set, key, queues, site)
+        if wrong.level != OK:
+            found.add(
+                WARN,
+                wrong.name,
+                f"{wrong.message}; {COMMAND} --write replaces it with {url}",
+            )
+    jql = str(chosen.get("jql") or "")
+    if not UNRESOLVED.search(jql):
         found.add(
             WARN,
             "queue",
             f"{url} does not filter on resolution = Unresolved, so a completed Incident stays "
             f"in it: {clipped(jql)}",
         )
+    elif len(named) == 1:
+        found.add(OK, "queue", url)
+    else:
+        pool = (
+            f"{len(named)} queues are named {QUEUE}, and it is the only one of them"
+            if named
+            else f"no queue is named {QUEUE}, and it is the only one"
+        )
+        found.add(
+            OK,
+            "queue",
+            f'{url} (the queue "{clipped(str(chosen.get("name")))}": {pool} whose JQL shows '
+            f"{key}'s open Incidents)",
+        )
+
+
+def left_as_it_is(
+    found: Discovery,
+    key: str,
+    project_id: str,
+    queues: list[dict],
+    named: list[dict],
+    shown: list[dict],
+    site: str,
+    why: str,
+    hand_set: str,
+) -> None:
+    """Leave `DEMO_QUEUE_URL` alone, and say why and how to choose.
+
+    A `hand_set` address that is one of the project's queues and filters on the
+    resolution is all the demo needs, so that one line is the answer. Otherwise the
+    candidates are listed, each with its address and its JQL: the queues that show the
+    project's open Incidents, and the ones that could.
+    """
+    if hand_set:
+        check = set_queue_check(hand_set, key, queues, site)
+        found.checks.append(check)
+        if check.level == OK:
+            found.confirmed.add(QUEUE_URL_VARIABLE)
+            return
+    pool = (
+        f"{len(named)} queues are named {QUEUE} on {key}"
+        if named
+        else f"no queue is named {QUEUE} on {key}"
+    )
+    if shown:
+        reason = (
+            f"{pool}, and {len(shown)} {'of them ' if named else 'queues '}have JQL that shows "
+            "its open Incidents"
+        )
+    else:
+        reason = (
+            f"{pool}, and none has JQL that shows exactly its open Incidents (the project, "
+            "issuetype = Incident and resolution = Unresolved)"
+        )
+    candidates = [
+        queue
+        for queue in named or queues
+        if queue in shown or could_show_incidents(str(queue.get("jql") or ""), key, project_id)
+    ]
+    if candidates:
+        how = (
+            f"to choose one, set {QUEUE_URL_VARIABLE} in .env to its address (listed below) and "
+            f"run {COMMAND} again to check it"
+        )
+    else:
+        how = (
+            f"to choose one, open {key}'s Queues, click the one that shows its open Incidents "
+            f"and copy its address into {QUEUE_URL_VARIABLE} in .env, or make a queue with the "
+            f"JQL: project = {key} AND issuetype = Incident AND resolution = Unresolved "
+            "ORDER BY created DESC"
+        )
+    found.add(WARN, "queue", f"{reason}, so {QUEUE_URL_VARIABLE} is left as it is; {how}")
+    for queue in candidates:
+        address = (
+            queue_address(site, key, queue)
+            if site
+            else f"queue {queue.get('id')} (the site's address could not be read: {why})"
+        )
+        found.add(
+            WARN,
+            "queue",
+            f'candidate "{clipped(str(queue.get("name")))}" (id {queue.get("id")}): {address}; '
+            f"JQL: {clipped(str(queue.get('jql') or ''))}",
+        )
+
+
+def queue_address(site: str, key: str, queue: dict) -> str:
+    """The address a browser shows for one of the project's custom queues."""
+    return f"{site}/jira/servicedesk/projects/{key}/queues/custom/{queue.get('id')}"
+
+
+def set_queue_check(address: str, key: str, queues: list[dict], site: str) -> Check:
+    """Whether the address `.env` holds is a queue of the project's service desk.
+
+    It must be on the demo's site, name this project's key and name a queue the desk
+    has, or the presenter's right-hand window shows another project's Incidents or
+    nothing: a FAIL. An address not shaped like a custom queue's is only a WARN, since it
+    cannot be checked rather than being wrong. Like a discovered queue it must filter on
+    the resolution, or a completed Incident stays in it.
+    """
+    shape = QUEUE_ADDRESS.search(urlsplit(address).path)
+    if shape is None:
+        return Check(
+            WARN,
+            "queue",
+            f"{QUEUE_URL_VARIABLE} is not shaped like <site>/jira/servicedesk/projects/{key}/"
+            f"queues/custom/<id>, so it was not checked against {key}'s queues: {clipped(address)}",
+        )
+    host = urlsplit(address).netloc
+    if site and host.lower() != urlsplit(site).netloc.lower():
+        return Check(
+            FAIL,
+            "queue",
+            f"{QUEUE_URL_VARIABLE} is on {host}, not on the demo's site {urlsplit(site).netloc}: "
+            f"copy the address of {key}'s queue from the demo's site",
+        )
+    if shape["key"].upper() != key.upper():
+        return Check(
+            FAIL,
+            "queue",
+            f"{QUEUE_URL_VARIABLE} is a queue of project {shape['key']}, not of {key}: open "
+            f"{key}'s Queues, click the one that shows its open Incidents and copy its address",
+        )
+    queue = next((queue for queue in queues if str(queue.get("id")) == shape["id"]), None)
+    if queue is None:
+        return Check(
+            FAIL,
+            "queue",
+            f"{QUEUE_URL_VARIABLE} names queue {shape['id']}, which {key}'s service desk does "
+            "not have: open its Queues, click the one that shows its open Incidents and copy "
+            "its address",
+        )
+    jql = str(queue.get("jql") or "")
+    if not UNRESOLVED.search(jql):
+        return Check(
+            WARN,
+            "queue",
+            f"{address} does not filter on resolution = Unresolved, so a completed Incident "
+            f"stays in it: {clipped(jql)}",
+        )
+    return Check(
+        OK,
+        "queue",
+        f'{QUEUE_URL_VARIABLE} is the queue "{clipped(str(queue.get("name")))}" of {key}\'s '
+        "service desk, and it filters on resolution = Unresolved",
+    )
+
+
+def jql_clauses(jql: str) -> list[str]:
+    """The clauses a JQL query ANDs together, its `ORDER BY` dropped; none when it has an OR.
+
+    Quoted strings and parenthesised groups are blanked to find the joints, so the clauses
+    are cut out of the original text, and `project in (A AND B)` stays one.
+    """
+    blanked = QUOTED.sub(lambda quoted: "_" * len(quoted[0]), jql)
+    while (inner := INNERMOST.sub(lambda group: "_" * len(group[0]), blanked)) != blanked:
+        blanked = inner
+    clauses, start = [], 0
+    for joint in JOINT.finditer(blanked):
+        word = joint[0].strip().lower()
+        if word in ("or", "||"):
+            return []
+        clauses.append(jql[start : joint.start()])
+        start = joint.end()
+        if word.startswith("order"):
+            break
+    else:
+        clauses.append(jql[start:])
+    return [clause.strip() for clause in clauses if clause.strip()]
+
+
+def clause_kinds(jql: str, key: str, project_id: str) -> set[str | None]:
+    """What each clause of the query says, of the three `shows_open_incidents` needs.
+
+    A clause that says anything else is None, so a query with one is never mistaken for
+    a queue of exactly the project's open Incidents.
+    """
+    names = "|".join(re.escape(name) for name in (key, project_id) if name)
+    project = re.compile(rf"""(?i)project\s*(?:=\s*|in\s*\(\s*)(["']?)(?:{names})\1\s*\)?""")
+
+    def kind(clause: str) -> str | None:
+        if project.fullmatch(clause):
+            return "project"
+        if INCIDENT_TYPE.fullmatch(clause):
+            return "type"
+        return "unresolved" if UNRESOLVED.fullmatch(clause) else None
+
+    return {kind(clause) for clause in jql_clauses(jql)}
+
+
+def shows_open_incidents(jql: str, key: str, project_id: str) -> bool:
+    """Whether the queue's JQL is the project's open Incidents and nothing else.
+
+    It names the project, the Incident issue type and `resolution = Unresolved`, and
+    has no other condition: an assignee, a status or an OR would leave some open
+    Incident out of the screen the audience is shown (ADR 0004).
+    """
+    return clause_kinds(jql, key, project_id) == {"project", "type", "unresolved"}
+
+
+def could_show_incidents(jql: str, key: str, project_id: str) -> bool:
+    """Whether a queue is worth offering when none shows exactly the open Incidents: its JQL
+    names Incidents, or it shows every open issue of the project."""
+    return bool(MENTIONS_INCIDENTS.search(jql)) or (
+        clause_kinds(jql, key, project_id) == {"project", "unresolved"}
+    )
 
 
 def find_service_desk(jira_as: JiraAs, key: str, project_id: str) -> dict | None:
@@ -1159,7 +1426,13 @@ def main(
         return 2
     jira_as = jira_as_with(environment) if jira_as is None else jira_as
     try:
-        found = discover(project.key, environment[SITE_URL_VARIABLE], jira_as, project)
+        found = discover(
+            project.key,
+            environment[SITE_URL_VARIABLE],
+            jira_as,
+            project,
+            values.get(QUEUE_URL_VARIABLE, "").strip(),
+        )
     except FileNotFoundError:
         print(
             "jira-as is not on PATH: install the Jira Assistant CLI 2.x (README, What you need)",

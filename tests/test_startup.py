@@ -18,9 +18,11 @@ from pathlib import Path
 import pytest
 
 from grafana_jsm_sandbox import __main__ as process
+from grafana_jsm_sandbox import doctor
 from grafana_jsm_sandbox.__main__ import (
     LOG_FORMAT,
     LOG_TIME_FORMAT,
+    MODEL_PREFLIGHT,
     RUN_BUDGET_VARIABLE,
     RUN_MODEL_VARIABLE,
     Settings,
@@ -552,6 +554,24 @@ def test_startup_says_which_model_runs_use_and_that_there_is_no_cap(caplog):
     said = caplog.text
     assert f"runs use model {DEFAULT_MODEL} (RUN_MODEL)" in said
     assert "runs have no spending cap (RUN_BUDGET_USD is not set)" in said
+
+
+def test_startup_says_it_does_not_check_the_seat_can_run_the_model_and_names_the_doctor(caplog):
+    settings = Settings.from_environment(complete_but(RUN_MODEL="claude-haiku-4.5"))
+
+    with caplog.at_level(logging.INFO, logger=process.__name__):
+        log_run_knobs(settings)
+
+    said = [record.getMessage() for record in caplog.records]
+    model = said.index("runs use model claude-haiku-4.5 (RUN_MODEL)")
+    assert said[model + 1] == (
+        "startup does not check that the Claude seat can run claude-haiku-4.5; before a demo on "
+        f"a model not tried yet, run `{MODEL_PREFLIGHT}` on the laptop, which says which model ran"
+    )
+
+
+def test_the_command_startup_names_is_the_doctor_s_model_preflight():
+    assert MODEL_PREFLIGHT == f"{doctor.COMMAND} --only stack --with-model"
 
 
 def test_startup_says_what_one_run_may_spend(caplog):

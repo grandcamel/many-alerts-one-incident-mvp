@@ -64,6 +64,9 @@ from tests.test_configure import (
     Refusal,
     custom_workflow,
     fixture_answers,
+    queue_address,
+    queue_named,
+    rename_incidents,
 )
 from tests.upstream import FakeUpstream
 
@@ -98,6 +101,7 @@ def env_text(**overrides: str | None) -> str:
         "DEMO_PROJECT_KEY": KEY,
         "DEMO_SESSION_ID": "rehearsal1",
         **FOUND,
+        "DEMO_QUEUE_URL": queue_address("32", site=SITE),
         **overrides,
     }
     return "".join(f"{name}={value}\n" for name, value in values.items() if value is not None)
@@ -1035,6 +1039,119 @@ def test_no_queue_url_warns(env_file):
     assert only(doctor.facts(laptop(env_file)), "queue url").level == "WARN"
 
 
+def test_no_queue_url_the_project_gives_is_fixed_by_configure(env_file):
+    env_file.write_text(env_text(DEMO_QUEUE_URL=""))
+
+    line = only(doctor.facts(laptop(env_file)), "queue url")
+
+    assert line.level == "WARN"
+    assert "DEMO_QUEUE_URL is empty" in line.message
+    assert "`python3 -m grafana_jsm_sandbox.configure --write`" in line.message
+    assert "by hand" not in line.message
+
+
+def test_a_queue_with_another_name_that_configure_would_take_is_fixed_by_configure(env_file):
+    env_file.write_text(env_text(DEMO_QUEUE_URL=""))
+    jira = DoctorJira()
+    rename_incidents(jira)
+
+    lines = doctor.facts(laptop(env_file, jira_as=jira))
+
+    assert "configure --write" in only(lines, "queue url").message
+    assert queue_address("32", site=SITE) in only(lines, "queue").message
+
+
+def ambiguous_queues(jira: FakeJira) -> None:
+    """Two queues that both show the open Incidents, so `configure` takes neither."""
+    rename_incidents(jira)
+    queue_named(jira, "Problems")["jql"] = queue_named(jira, "Open incidents")["jql"]
+
+
+def test_no_queue_url_configure_cannot_find_is_set_by_hand_and_never_by_configure_write(env_file):
+    env_file.write_text(env_text(DEMO_QUEUE_URL=""))
+    jira = DoctorJira()
+    ambiguous_queues(jira)
+
+    lines = doctor.facts(laptop(env_file, jira_as=jira))
+
+    line = only(lines, "queue url")
+    assert line.level == "WARN"
+    assert "--write" not in line.message
+    assert "`python3 -m grafana_jsm_sandbox.configure` cannot find it for you" in line.message
+    assert (
+        "set it by hand" in line.message
+        and "copying its address into DEMO_QUEUE_URL" in line.message
+    )
+    assert "the `queue` lines above list the candidates" in line.message
+    candidates = [line for line in lines_of(lines, "queue") if "candidate" in line.message]
+    assert len(candidates) == 3, "the three queues that could show the Incidents are listed"
+
+
+def test_no_queue_url_when_jira_would_not_list_the_queues_is_set_by_hand(env_file):
+    env_file.write_text(env_text(DEMO_QUEUE_URL=""))
+    jira = DoctorJira()
+    jira.answers["getQueues"] = Refusal(500, ["Internal server error"])
+
+    lines = doctor.facts(laptop(env_file, jira_as=jira))
+
+    assert "Jira answered 500" in lines_of(lines, "service desk")[-1].message
+    line = only(lines, "queue url")
+    assert "set it by hand" in line.message and "--write" not in line.message
+
+
+def test_a_queue_whose_jql_names_the_project_by_id_is_found_as_configure_finds_it(env_file):
+    """`configure` reads the project's id and `check_queue` takes a JQL that names it; `doctor`
+    gave it none, so it advised setting the address by hand for a queue `--write` would write."""
+    env_file.write_text(env_text(DEMO_QUEUE_URL=""))
+    jira = DoctorJira()
+    rename_incidents(
+        jira, jql="project = 10042 AND issuetype = Incident AND resolution = Unresolved"
+    )
+
+    lines = doctor.facts(laptop(env_file, jira_as=jira))
+
+    line = only(lines, "queue url")
+    assert "configure --write" in line.message and "by hand" not in line.message
+    assert queue_address("32", site=SITE) in only(lines, "queue").message
+    assert ("api", "call", "getProject", "--project-id-or-key", KEY) in jira.calls
+
+
+def test_a_project_jira_will_not_describe_costs_only_the_queues_named_by_id(env_file):
+    env_file.write_text(env_text(DEMO_QUEUE_URL=""))
+    jira = DoctorJira()
+    jira.answers["getProject"] = Refusal(500, ["Internal server error"])
+    rename_incidents(jira)
+
+    lines = doctor.facts(laptop(env_file, jira_as=jira))
+
+    assert "configure --write" in only(lines, "queue url").message, "the JQL names the key"
+
+
+def test_a_queue_url_that_is_set_by_hand_and_the_project_s_own_is_ok(env_file):
+    env_file.write_text(env_text(DEMO_QUEUE_URL=queue_address("30", site=SITE)))
+    jira = DoctorJira()
+    ambiguous_queues(jira)
+
+    lines = doctor.facts(laptop(env_file, jira_as=jira))
+
+    assert only(lines, "queue url").level == "OK"
+    assert only(lines, "queue").level == "OK"
+    assert not [line for line in lines if line.level == "FAIL"], [l.text for l in lines]
+
+
+@pytest.mark.parametrize("address", [queue_address("32", key="OTHER"), queue_address("99")])
+def test_a_queue_url_that_is_not_the_project_s_is_a_stop(env_file, address):
+    env_file.write_text(env_text(DEMO_QUEUE_URL=address))
+    jira = DoctorJira()
+    ambiguous_queues(jira)
+
+    lines = doctor.facts(laptop(env_file, jira_as=jira))
+
+    line = next(line for line in lines_of(lines, "queue") if line.level == "FAIL")
+    assert line.message.startswith("DEMO_QUEUE_URL ")
+    assert only(lines, "queue url").level == "OK", "it is set; the queue line says it is wrong"
+
+
 def test_facts_only_read(env_file):
     jira = DoctorJira()
 
@@ -1824,7 +1941,7 @@ def skill_of(runs: Path) -> Path:
 
 
 def test_a_run_that_does_what_it_is_asked_is_ok(upstream, runs, unreadable, claude):
-    with_stream(claude, events_for(skill_of(runs)))
+    with_stream(claude, answered_by(events_for(skill_of(runs)), "claude-opus-5"))
 
     lines = model_run(upstream, runs, unreadable, claude)
 
@@ -1964,7 +2081,136 @@ def test_a_model_other_than_the_one_asked_for_warns(upstream, runs, unreadable, 
     line = only(model_run(upstream, runs, unreadable, claude), "model")
 
     assert line.level == "WARN"
-    assert "asked for claude-opus-5 and Claude Code reports claude-sonnet-5" in line.message
+    assert line.message.startswith(
+        "requested claude-opus-5, but Claude Code reports claude-sonnet-5: that is not the same "
+        "model, so the seat chose for the Run, or claude-opus-5 is misspelled; "
+    )
+    assert "set RUN_MODEL in .env to a model the seat can run" in line.message
+
+
+def answered_by(events: list, *models: str) -> list:
+    """The Transcript with an assistant message from each model, as the API names it."""
+    return [
+        events[0],
+        *({"type": "assistant", "message": {"model": model, "content": []}} for model in models),
+        *events[1:],
+    ]
+
+
+def test_the_model_line_names_the_requested_model_and_the_one_that_ran(
+    upstream, runs, unreadable, claude
+):
+    with_stream(claude, answered_by(events_for(skill_of(runs)), "claude-opus-5"))
+
+    line = only(model_run(upstream, runs, unreadable, claude), "model")
+
+    assert (line.level, line.message) == ("OK", "requested claude-opus-5, ran claude-opus-5")
+
+
+@pytest.mark.parametrize(
+    ("requested", "ran", "pin"),
+    [
+        ("opus", "claude-opus-5", "claude-opus-5"),
+        ("claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001"),
+        ("claude-haiku-4.5", "claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001"),
+        # The context window the presenter asked for stays on the name that pins the model:
+        # without it the advice would run the model with a smaller window.
+        ("sonnet[1m]", "claude-sonnet-5", "claude-sonnet-5[1m]"),
+        ("claude-opus-5[1m]", "claude-opus-5-20261001", "claude-opus-5-20261001[1m]"),
+    ],
+)
+def test_an_alias_that_resolved_is_ok_and_the_full_name_is_shown(
+    upstream, runs, unreadable, claude, requested, ran, pin
+):
+    with_stream(claude, answered_by(events_for(skill_of(runs), model=ran), ran))
+
+    line = only(model_run(upstream, runs, unreadable, claude, RUN_MODEL=requested), "model")
+
+    assert line.level == "OK"
+    assert line.message == (
+        f"requested {requested}, ran {ran}: the same model, as Claude Code names it; "
+        f"RUN_MODEL={pin} pins it"
+    )
+
+
+def test_a_run_no_model_answered_is_not_an_ok_model_line_though_claude_code_names_the_model(
+    upstream, runs, unreadable, claude
+):
+    """Claude Code's init event says what it started with. With no assistant message naming a
+    model, nothing shows the model ran, so the line must not say it did."""
+    with_stream(claude, events_for(skill_of(runs), model="claude-opus-5"))
+
+    line = only(model_run(upstream, runs, unreadable, claude, RUN_MODEL="claude-opus-5"), "model")
+
+    assert line.level == "WARN"
+    assert line.message == (
+        "requested claude-opus-5; no model answered the Run, so which one ran is not known "
+        "(Claude Code reports claude-opus-5, which is what it started with)"
+    )
+
+
+def test_a_refused_run_whose_init_names_the_requested_model_is_a_warning_too(
+    upstream, runs, unreadable, claude
+):
+    (claude / "stream.jsonl").write_text((FIXTURES / "run-transcript-refused.jsonl").read_text())
+
+    lines = model_run(upstream, runs, unreadable, claude, RUN_MODEL="claude-fable-5-1")
+
+    assert only(lines, "model").level == "WARN"
+    assert "no model answered the Run" in only(lines, "model").message
+    assert only(lines, "run").level == "FAIL", "the outcome is the run line's, as before"
+
+
+@pytest.mark.parametrize(
+    ("requested", "ran"),
+    [
+        ("claude-opus-5", "claude-sonnet-5"),
+        ("claude-haiku-4.5", "claude-haiku-5"),
+        ("claude-opus-5", "claude-opus-5-1"),
+        ("sonnet", "claude-opus-5"),
+    ],
+)
+def test_a_model_that_is_not_the_one_asked_for_is_a_substitution_and_warns(
+    upstream, runs, unreadable, claude, requested, ran
+):
+    """The init event can name what was asked for while the API served another model."""
+    with_stream(claude, answered_by(events_for(skill_of(runs), model=requested), ran))
+
+    line = only(model_run(upstream, runs, unreadable, claude, RUN_MODEL=requested), "model")
+
+    assert line.level == "WARN"
+    assert line.message.startswith(f"requested {requested}, but ran {ran}: that is not the same")
+
+
+def test_a_run_the_seat_refused_names_no_model_that_ran(upstream, runs, unreadable, claude):
+    (claude / "stream.jsonl").write_text((FIXTURES / "run-transcript-refused.jsonl").read_text())
+
+    line = only(model_run(upstream, runs, unreadable, claude), "model")
+
+    assert line.level == "WARN"
+    assert "requested claude-opus-5, but Claude Code reports claude-fable-5-1" in line.message
+    assert "ran claude-fable-5-1" not in line.message, "the refusal is Claude Code's own message"
+
+
+def test_only_the_models_that_wrote_assistant_messages_answered():
+    events = [
+        {"type": "system", "subtype": "init", "model": "claude-opus-5"},
+        {"type": "assistant", "message": {"model": "<synthetic>", "content": []}},
+        {"type": "assistant", "message": {"model": "claude-opus-5", "content": []}},
+        {"type": "assistant", "message": {"content": []}},
+        {"type": "user", "message": {"model": "claude-haiku-5"}},
+        {"type": "assistant", "message": {"model": "claude-opus-5", "content": []}},
+        {"type": "assistant", "message": {"model": "claude-haiku-5", "content": []}},
+    ]
+
+    assert doctor.models_that_answered(events) == ["claude-opus-5", "claude-haiku-5"]
+
+
+def test_a_second_model_that_answered_is_named_and_judged_with_the_first():
+    line = doctor.model_line("claude-opus-5", "claude-opus-5", ["claude-opus-5", "claude-haiku-5"])
+
+    assert line.level == "WARN"
+    assert "but ran claude-opus-5, claude-haiku-5" in line.message
 
 
 def test_a_run_that_never_makes_the_calls_warns(upstream, runs, unreadable, claude):

@@ -291,6 +291,22 @@ def test_every_line_is_in_the_documented_format(configure):
         assert END_LINE.match(said.lines[-1]), said.lines[-1]
 
 
+def test_the_lines_of_a_queue_that_is_listed_or_checked_are_in_the_documented_format(
+    configure, env_file
+):
+    ambiguous = FakeJira()
+    rename_incidents(ambiguous)
+    queue_named(ambiguous, "Problems")["jql"] = queue_named(ambiguous, "Open incidents")["jql"]
+    none = FakeJira()
+    rename_incidents(none, jql="assignee = currentUser()")
+    for jira, hand_set in ((ambiguous, ""), (none, ""), (none, queue_address("99", key="OTHER"))):
+        env_file.write_text(ENV_FILE.replace("DEMO_QUEUE_URL=", f"DEMO_QUEUE_URL={hand_set}"))
+        said = configure(jira)
+        for line in said.lines[:-1]:
+            assert CHECK_LINE.match(line) or ENV_LINE.match(line) or DIFF_LINE.match(line), line
+        assert END_LINE.match(said.lines[-1]), said.lines[-1]
+
+
 def test_by_default_it_prints_the_planned_diff_and_leaves_env_as_it_was(configure, env_file):
     before = env_file.read_bytes()
 
@@ -820,20 +836,322 @@ def test_through_the_api_gateway_the_queue_s_address_is_the_site_s_own(configure
     assert said.check("queue") == [f"OK   queue: {FOUND['DEMO_QUEUE_URL']}"]
 
 
-def test_no_incidents_queue_leaves_the_queue_url_as_it_is(configure, env_file):
+def queue_named(jira: FakeJira, name: str) -> dict:
+    """The fixture's queue with this name."""
+    return next(queue for queue in jira.answers["getQueues"]["values"] if queue["name"] == name)
+
+
+def rename_incidents(jira: FakeJira, name: str = "Open incidents", jql: str | None = None) -> dict:
+    """The Incidents queue under another name, and with another JQL when one is given."""
+    queue = queue_named(jira, "Incidents")
+    queue["name"] = name
+    if jql is not None:
+        queue["jql"] = jql
+    return queue
+
+
+def queue_address(queue_id: str, key: str = KEY, site: str = SITE) -> str:
+    return f"{site}/jira/servicedesk/projects/{key}/queues/custom/{queue_id}"
+
+
+def test_a_queue_with_another_name_that_shows_the_open_incidents_is_chosen(configure, env_file):
     jira = FakeJira()
-    for queue in jira.answers["getQueues"]["values"]:
-        if queue["name"] == "Incidents":
-            queue["name"] = "Open incidents"
-    hand_set = f"{SITE}/jira/servicedesk/projects/{KEY}/queues/custom/99"
-    env_file.write_text(ENV_FILE.replace("DEMO_QUEUE_URL=", f"DEMO_QUEUE_URL={hand_set}"))
+    rename_incidents(jira)
 
     said = configure(jira, "--write")
 
+    (line,) = said.check("queue")
+    assert line.startswith(f"OK   queue: {FOUND['DEMO_QUEUE_URL']} (")
+    assert 'the queue "Open incidents"' in line and "no queue is named Incidents" in line
+    assert "the only one whose JQL shows SANDBOX's open Incidents" in line
+    assert f"+ DEMO_QUEUE_URL={FOUND['DEMO_QUEUE_URL']}" in said.lines
+    assert read_env_file(env_file)["DEMO_QUEUE_URL"] == FOUND["DEMO_QUEUE_URL"]
+    assert said.code == 0
+
+
+@pytest.mark.parametrize(
+    "jql",
+    [
+        'project = "SANDBOX" AND issuetype = "Incident" AND resolution = Unresolved',
+        "project in (SANDBOX) and type = Incident and resolution is EMPTY order by created desc",
+        "project = 10042 AND issuetype = Incident AND resolution = Unresolved",
+        "issuetype in (Incident) && resolution = EMPTY && project = SANDBOX ORDER BY rank",
+        "project = SANDBOX AND issuetype = Incident AND resolution = Unresolved",
+    ],
+)
+def test_every_way_jql_says_the_open_incidents_is_a_queue_that_is_chosen(configure, jql):
+    jira = FakeJira()
+    rename_incidents(jira, jql=jql)
+
+    said = configure(jira)
+
+    assert said.level("queue") == "OK"
+    assert f"+ DEMO_QUEUE_URL={FOUND['DEMO_QUEUE_URL']}" in said.lines
+
+
+def test_a_queue_of_every_open_issue_is_not_taken_for_the_incidents_queue(configure):
+    """The fixture's `All open` names the project and the resolution, and shows Service
+    requests too: only the one that also names Incident is the choice."""
+    jira = FakeJira()
+    rename_incidents(jira)
+
+    configure(jira)
+
+    all_open = queue_named(jira, "All open")
+    assert "issuetype" not in all_open["jql"] and "resolution = Unresolved" in all_open["jql"]
+    assert f"+ DEMO_QUEUE_URL={queue_address('30')}" not in configure(jira).lines
+
+
+OPEN_INCIDENTS = "project = SANDBOX AND issuetype = Incident AND resolution = Unresolved"
+
+
+@pytest.mark.parametrize(
+    "jql",
+    [
+        f"{OPEN_INCIDENTS} AND assignee = currentUser()",
+        f"{OPEN_INCIDENTS} AND status != Closed",
+        "project = SANDBOX AND (issuetype = Incident OR issuetype = Problem) AND resolution = Unresolved",
+        "project = SANDBOX AND issuetype = Incident OR resolution = Unresolved",
+        "project = OTHER AND issuetype = Incident AND resolution = Unresolved",
+        "project = SANDBOX AND issuetype = Incident",
+        "issuetype = Incident AND resolution = Unresolved",
+    ],
+)
+def test_jql_that_is_not_exactly_the_open_incidents_is_not_chosen(configure, jql):
+    jira = FakeJira()
+    rename_incidents(jira, jql=jql)
+
+    said = configure(jira)
+
     assert said.level("queue") == "WARN"
     assert not any("DEMO_QUEUE_URL" in line for line in said.lines if DIFF_LINE.match(line))
-    assert read_env_file(env_file)["DEMO_QUEUE_URL"] == hand_set
+    assert said.check("queue")[0].startswith("WARN queue: no queue is named Incidents on SANDBOX")
+
+
+def test_two_queues_that_show_the_open_incidents_are_listed_and_none_is_chosen(configure):
+    jira = FakeJira()
+    rename_incidents(jira)
+    queue_named(jira, "Problems")["jql"] = (
+        'project = "SANDBOX" AND issuetype = Incident AND resolution = Unresolved'
+    )
+
+    said = configure(jira, "--write")
+
+    summary, *candidates = said.check("queue")
+    assert summary.startswith(
+        "WARN queue: no queue is named Incidents on SANDBOX, and 2 queues have JQL that shows "
+        "its open Incidents, so DEMO_QUEUE_URL is left as it is; "
+    )
+    assert "to choose one, set DEMO_QUEUE_URL in .env to its address (listed below)" in summary
+    assert "run python3 -m grafana_jsm_sandbox.configure again to check it" in summary
+    listed = {
+        line.split('"')[1]: line for line in candidates if line.startswith("WARN queue: candidate ")
+    }
+    assert set(listed) == {"Open incidents", "Problems", "All open"}
+    assert (
+        f"(id 32): {queue_address('32')}; JQL: project = SANDBOX AND issuetype"
+        in (listed["Open incidents"])
+    )
+    assert f"(id 34): {queue_address('34')};" in listed["Problems"]
+    assert "Assigned to me" not in said.out and "Service requests" not in said.out
+    assert not any("DEMO_QUEUE_URL" in line for line in said.lines if DIFF_LINE.match(line))
+    assert ".env: not checked: DEMO_QUEUE_URL" in said.out
     assert said.code == 0
+
+
+def test_a_queue_that_could_show_the_incidents_is_a_candidate_though_none_is_chosen(configure):
+    jira = FakeJira()
+    rename_incidents(jira, jql="project = SANDBOX AND issuetype = Incident ORDER BY created")
+
+    said = configure(jira)
+
+    summary, *candidates = said.check("queue")
+    assert "none has JQL that shows exactly its open Incidents" in summary
+    assert "issuetype = Incident and resolution = Unresolved" in summary
+    assert [line.split('"')[1] for line in candidates] == ["All open", "Open incidents"]
+
+
+def test_no_queue_that_could_show_the_incidents_says_how_to_make_one(configure):
+    jira = FakeJira()
+    rename_incidents(jira, jql="assignee = currentUser()")
+    for queue in jira.answers["getQueues"]["values"]:
+        queue["jql"] = queue["jql"].replace("resolution = Unresolved", "assignee = currentUser()")
+
+    said = configure(jira)
+
+    (line,) = said.check("queue")
+    assert line.startswith("WARN queue: no queue is named Incidents on SANDBOX, and none has JQL")
+    assert "open SANDBOX's Queues, click the one that shows its open Incidents" in line
+    assert "or make a queue with the JQL: project = SANDBOX AND issuetype = Incident AND" in line
+    assert "resolution = Unresolved ORDER BY created DESC" in line
+
+
+def test_two_queues_named_incidents_are_chosen_between_by_their_jql(configure):
+    jira = FakeJira()
+    jira.answers["getQueues"]["values"].append(
+        {**queue_named(jira, "Incidents"), "id": "35", "jql": "project = SANDBOX"}
+    )
+
+    said = configure(jira)
+
+    (line,) = said.check("queue")
+    assert line == (
+        f'OK   queue: {FOUND["DEMO_QUEUE_URL"]} (the queue "Incidents": 2 queues are named '
+        "Incidents, and it is the only one of them whose JQL shows SANDBOX's open Incidents)"
+    )
+    assert "no queue is named" not in line, "two queues are named Incidents"
+
+
+def test_a_queue_chosen_when_none_is_named_incidents_says_so(configure):
+    jira = FakeJira()
+    rename_incidents(jira)
+
+    said = configure(jira)
+
+    (line,) = said.check("queue")
+    assert line == (
+        f'OK   queue: {FOUND["DEMO_QUEUE_URL"]} (the queue "Open incidents": no queue is named '
+        "Incidents, and it is the only one whose JQL shows SANDBOX's open Incidents)"
+    )
+
+
+def test_two_queues_named_incidents_that_both_show_them_are_listed(configure):
+    jira = FakeJira()
+    jira.answers["getQueues"]["values"].append({**queue_named(jira, "Incidents"), "id": "35"})
+
+    said = configure(jira)
+
+    summary, *candidates = said.check("queue")
+    assert summary.startswith("WARN queue: 2 queues are named Incidents on SANDBOX, and 2 of them")
+    assert len(candidates) == 2 and all("candidate" in line for line in candidates)
+    assert not any("DEMO_QUEUE_URL" in line for line in said.lines if DIFF_LINE.match(line))
+
+
+def test_the_candidates_carry_ids_when_the_site_s_address_cannot_be_read(configure, env_file):
+    gateway = "https://api.atlassian.com/ex/jira/00000000-0000-0000-0000-000000000000"
+    env_file.write_text(ENV_FILE.replace(f"JIRA_SITE_URL={SITE}", f"JIRA_SITE_URL={gateway}"))
+    jira = FakeJira()
+    rename_incidents(jira)
+    queue_named(jira, "Problems")["jql"] = queue_named(jira, "Open incidents")["jql"]
+    jira.answers["getServerInfo"] = Refusal(500, ["Internal server error"])
+
+    said = configure(jira)
+
+    candidate = next(line for line in said.check("queue") if '"Problems"' in line)
+    assert "queue 34 (the site's address could not be read: Internal server error)" in candidate
+
+
+def test_a_hand_set_queue_of_the_project_that_empties_is_all_the_demo_needs(configure, env_file):
+    jira = FakeJira()
+    rename_incidents(jira, jql="project = SANDBOX AND issuetype = Incident")
+    env_file.write_text(
+        ENV_FILE.replace("DEMO_QUEUE_URL=", f"DEMO_QUEUE_URL={queue_address('30')}")
+    )
+
+    said = configure(jira, "--write")
+
+    (line,) = said.check("queue")
+    assert line == (
+        'OK   queue: DEMO_QUEUE_URL is the queue "All open" of SANDBOX\'s service desk, and it '
+        "filters on resolution = Unresolved"
+    )
+    assert read_env_file(env_file)["DEMO_QUEUE_URL"] == queue_address("30")
+    assert not [line for line in said.lines if line.startswith(".env: not checked")], (
+        "the queue check just said it is the project's own queue"
+    )
+    assert said.code == 0
+
+
+def test_a_hand_set_queue_that_keeps_resolved_incidents_is_a_warning_with_the_candidates(
+    configure, env_file
+):
+    jira = FakeJira()
+    rename_incidents(jira, jql="project = SANDBOX AND issuetype = Incident")
+    env_file.write_text(
+        ENV_FILE.replace("DEMO_QUEUE_URL=", f"DEMO_QUEUE_URL={queue_address('32')}")
+    )
+
+    said = configure(jira)
+
+    first, summary, *_ = said.check("queue")
+    assert first.startswith(f"WARN queue: {queue_address('32')} does not filter on resolution")
+    assert (
+        "so a completed Incident stays in it: project = SANDBOX AND issuetype = Incident" in first
+    )
+    assert summary.startswith("WARN queue: no queue is named Incidents")
+    assert said.code == 0
+
+
+@pytest.mark.parametrize(
+    ("address", "said"),
+    [
+        (queue_address("32", key="OTHER"), "is a queue of project OTHER, not of SANDBOX"),
+        (queue_address("32", key="sandbox2"), "is a queue of project sandbox2, not of SANDBOX"),
+        (queue_address("99"), "names queue 99, which SANDBOX's service desk does not have"),
+        (
+            queue_address("32", site="https://work.example.invalid"),
+            "is on work.example.invalid, not on the demo's site sandbox.example.invalid",
+        ),
+    ],
+)
+def test_a_hand_set_queue_that_is_not_the_project_s_fails_validation(
+    configure, env_file, address, said
+):
+    jira = FakeJira()
+    rename_incidents(jira, jql="assignee = currentUser()")
+    env_file.write_text(ENV_FILE.replace("DEMO_QUEUE_URL=", f"DEMO_QUEUE_URL={address}"))
+
+    out = configure(jira, "--write")
+
+    (line, *_) = out.check("queue")
+    assert line.startswith("FAIL queue: DEMO_QUEUE_URL ") and said in line
+    assert out.lines[-1].startswith("NOT READY: queue: ") and out.code == 1
+    assert read_env_file(env_file)["DEMO_QUEUE_URL"] == address, (
+        "a wrong address is left, not guessed"
+    )
+
+
+def test_a_hand_set_address_that_is_no_queue_s_is_not_checked_and_only_warns(configure, env_file):
+    jira = FakeJira()
+    rename_incidents(jira, jql="assignee = currentUser()")
+    env_file.write_text(
+        ENV_FILE.replace(
+            "DEMO_QUEUE_URL=", f"DEMO_QUEUE_URL={SITE}/jira/servicedesk/projects/{KEY}"
+        )
+    )
+
+    said = configure(jira)
+
+    (line, *_) = said.check("queue")
+    assert line.startswith("WARN queue: DEMO_QUEUE_URL is not shaped like <site>/jira/servicedesk/")
+    assert "so it was not checked against SANDBOX's queues" in line and said.code == 0
+
+
+def test_a_wrong_hand_set_queue_is_only_a_warning_when_this_run_replaces_it(configure, env_file):
+    other = queue_address("32", key="OTHER")
+    env_file.write_text(ENV_FILE.replace("DEMO_QUEUE_URL=", f"DEMO_QUEUE_URL={other}"))
+
+    said = configure(FakeJira(), "--write")
+
+    wrong, chosen = said.check("queue")
+    assert wrong.startswith(
+        "WARN queue: DEMO_QUEUE_URL is a queue of project OTHER, not of SANDBOX"
+    )
+    assert wrong.endswith(f"configure --write replaces it with {FOUND['DEMO_QUEUE_URL']}")
+    assert chosen == f"OK   queue: {FOUND['DEMO_QUEUE_URL']}"
+    assert read_env_file(env_file)["DEMO_QUEUE_URL"] == FOUND["DEMO_QUEUE_URL"]
+    assert said.code == 0
+
+
+def test_a_valid_hand_set_queue_that_the_run_replaces_adds_no_line_of_its_own(configure, env_file):
+    env_file.write_text(
+        ENV_FILE.replace("DEMO_QUEUE_URL=", f"DEMO_QUEUE_URL={queue_address('30')}")
+    )
+
+    said = configure(FakeJira())
+
+    assert said.check("queue") == [f"OK   queue: {FOUND['DEMO_QUEUE_URL']}"]
+    assert f"- DEMO_QUEUE_URL={queue_address('30')}" in said.lines
 
 
 def test_a_queue_that_does_not_filter_on_resolution_is_a_warning(configure):
