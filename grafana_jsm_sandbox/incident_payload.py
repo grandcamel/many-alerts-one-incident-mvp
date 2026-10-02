@@ -9,13 +9,17 @@ ADF Description, the comment text, which Alerts are new, repeat or resolved, and
 how long the Incident has been open. It prints `jira-as` command lines, and the
 Run runs them as printed.
 
+    incident-payload investigate --key KEY --observation TEXT --interpretation TEXT --unknown TEXT
     incident-payload match
     incident-payload create [--component NAME]
     incident-payload update --key KEY --labels LABELS --created TIME --server-time TIME
     incident-payload close --key KEY --labels LABELS --created TIME --server-time TIME
         --runs N [--leave-status]
 
-It is pure and local. It reads two files at fixed places, and no path named on its
+Investigation also reads `grafana-evidence.jsonl` in the working directory and adds
+readable ADF evidence with presenter links to three judgments supplied by the Run.
+
+It is pure and local. Lifecycle steps read two files at fixed places, and no path named on its
 command line: `notification.json` in the working directory, which is the Run's
 Notification, and `project.json` in the Skill the Receiver rendered for this
 start, `<runs directory>/.skill`, which is the working directory's parent's. That
@@ -42,22 +46,30 @@ character is a space. `plain` is idempotent, so applying it to text that already
 through it changes nothing.
 
 Bad input prints one line, `incident-payload: error: <why>`, and exits 2. The Skill
-treats that as the end of the Run: it finishes `failed`, and never builds the
-command by hand instead.
+treats a lifecycle error as the end of the Run: it finishes `failed`, and never
+builds the command by hand instead. An investigation error leaves a successful
+lifecycle successful, with investigation unavailable in the Finish.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlencode, urlsplit
 
+from grafana_jsm_sandbox.investigation_contract import (
+    EVIDENCE_FILENAME,
+    EVIDENCE_SCHEMA_VERSION,
+    INVESTIGATION_MARKER,
+)
 from grafana_jsm_sandbox.notification import NOTIFICATION_FILENAME
 from grafana_jsm_sandbox.run_command import RENDERED_SKILL
 
@@ -597,6 +609,242 @@ def close(
     ]
 
 
+# --- investigation evidence ---
+
+
+def _evidence_record(record: object) -> dict:
+    """Check schema v1 before any record contributes to a comment.
+
+    A corrupt record invalidates the whole file, including an earlier success.
+    These checks are format checks, not a query policy or a response-size cap.
+    """
+    def fields(value, shape):
+        if not isinstance(value, dict):
+            raise TypeError("not an object")
+        for name, kinds in shape.items():
+            if name not in value or type(value[name]) not in kinds:
+                raise ValueError("missing or invalid field")
+        return value
+
+    string = (str,)
+    nullable_string = (str, type(None))
+    number = (int, float)
+    nullable_number = (int, float, type(None))
+    record = fields(record, {
+        "schema_version": (int,), "command": string, "query": nullable_string,
+        "datasource": string, "path": string, "parameters": (list,), "window": (dict,),
+        "retrieved_at": string, "status": string, "error": (dict, type(None)),
+        "sample_summary": (dict,), "presenter_link": nullable_string,
+        "response": (dict, list, str, int, float, bool, type(None)),
+    })
+    if (record["schema_version"] != EVIDENCE_SCHEMA_VERSION
+            or record["command"] not in ("instant", "range", "get")
+            or record["status"] not in ("ok", "empty", "unavailable")):
+        raise ValueError("unknown schema, command or status")
+    if (record["query"] is None) != (record["command"] == "get"):
+        raise ValueError("query does not match command")
+    for pair in record["parameters"]:
+        if (not isinstance(pair, list) or len(pair) != 2
+                or not all(isinstance(item, str) for item in pair)):
+            raise ValueError("invalid parameter")
+    window = fields(record["window"], {
+        "start": nullable_string, "end": nullable_string, "step_seconds": nullable_number,
+    })
+    for value in (record["retrieved_at"], window["start"], window["end"]):
+        if value is not None:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", value):
+                raise ValueError("invalid evidence time")
+            datetime.fromisoformat(value)
+    step = window["step_seconds"]
+    if step is not None and (not math.isfinite(step) or step <= 0):
+        raise ValueError("invalid step")
+    if record["command"] in ("instant", "range") and (
+        window["start"] is None or window["end"] is None
+    ):
+        raise ValueError("query window missing")
+    if record["command"] == "range" and step is None:
+        raise ValueError("range step missing")
+    error = record["error"]
+    if (error is not None) != (record["status"] == "unavailable"):
+        raise ValueError("error does not match status")
+    if error is not None:
+        fields(error, {"kind": string, "message": string, "http_status": (int, type(None))})
+        if error["kind"] not in (
+            "token_rejected", "http_error", "query_error", "timeout", "unreachable",
+            "malformed_response",
+        ):
+            raise ValueError("unknown error kind")
+    summary = fields(record["sample_summary"], {
+        "result_type": nullable_string, "series_count": (int,), "sample_count": (int,),
+        "unmodelled_count": (int,), "discovery_items": (int, type(None)), "series": (list,),
+    })
+    for name in ("series_count", "sample_count", "unmodelled_count", "discovery_items"):
+        if summary[name] is not None and summary[name] < 0:
+            raise ValueError("negative count")
+    if summary["series_count"] != len(summary["series"]):
+        raise ValueError("series count mismatch")
+    if summary["result_type"] == "discovery" and summary["discovery_items"] is None:
+        raise ValueError("discovery count missing")
+    for series in summary["series"]:
+        fields(series, {"labels": (dict,), "count": (int,), "latest": (dict, type(None)),
+                        "min": nullable_string, "max": nullable_string})
+        if series["count"] < 0 or not all(
+            isinstance(value, str) for value in series["labels"].values()
+        ):
+            raise ValueError("invalid series")
+        if series["latest"] is not None:
+            fields(series["latest"], {"timestamp": number, "value": string})
+            datetime.fromtimestamp(series["latest"]["timestamp"], UTC)
+    link = record["presenter_link"]
+    if link is not None:
+        parsed = urlsplit(link)
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                or any(character in link for character in "'\\\n\r\t ()<>\"`$")):
+            raise ValueError("invalid encoded presenter link")
+    return record
+
+
+def read_evidence(path: Path) -> tuple[list[dict], str | None]:
+    """Every evidence record in append order, or the unavailable reason for the whole file."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return [], "no query evidence recorded"
+    except (OSError, UnicodeDecodeError):
+        return [], "evidence file unreadable"
+    if not text:
+        return [], "no query evidence recorded"
+    try:
+        records = [_evidence_record(json.loads(line)) for line in text.splitlines()]
+    except (ValueError, TypeError, OverflowError, OSError):
+        return [], "evidence file unreadable"
+    return records, None
+
+
+def evidence_result(record: dict) -> str:
+    """The summary in words, keeping unavailable, empty, zero and unmodelled data distinct."""
+    if record["status"] == "unavailable":
+        return "unavailable: " + plain(record["error"]["message"])
+    if record["status"] == "empty":
+        return "no data"
+    summary = record["sample_summary"]
+    if summary["result_type"] == "discovery":
+        return f"discovery: {summary['discovery_items']} items"
+    series = summary["series"]
+    if _observed_zero(record):
+        return "observed zero"
+    words = f"{summary['series_count']} series, {summary['sample_count']} samples"
+    if series:
+        first = series[0]
+        latest = first["latest"]
+        if latest is not None:
+            time = datetime.fromtimestamp(latest["timestamp"], UTC).isoformat(
+                timespec="milliseconds"
+            ).replace("+00:00", "Z")
+            words += f"; latest {plain(latest['value'])} at {time}"
+        words += f"; min {plain(first['min'] or 'none')}, max {plain(first['max'] or 'none')}"
+        if len(series) > 1:
+            words += f"; +{len(series) - 1} more series"
+    if summary["unmodelled_count"]:
+        words += f"; unmodelled samples={summary['unmodelled_count']}"
+    return words
+
+
+def _observed_zero(record: dict) -> bool:
+    """Check actual samples: finite zero bounds alone can hide a nonfinite sample."""
+    summary = record["sample_summary"]
+    if summary["sample_count"] == 0 or summary["unmodelled_count"]:
+        return False
+    response = record["response"]
+    data = response.get("data") if isinstance(response, dict) else None
+    if not isinstance(data, dict):
+        return False
+    result, kind = data.get("result"), data.get("resultType")
+    samples = []
+    if kind in ("scalar", "string"):
+        samples = [result]
+    elif kind in ("vector", "matrix") and isinstance(result, list):
+        for series in result:
+            if not isinstance(series, dict):
+                return False
+            if kind == "vector":
+                samples.append(series.get("value"))
+            else:
+                values = series.get("values", [])
+                if not isinstance(values, list):
+                    return False
+                samples.extend(values)
+    if len(samples) != summary["sample_count"]:
+        return False
+    for sample in samples:
+        if (not isinstance(sample, list) or len(sample) != 2
+                or not isinstance(sample[1], str)):
+            return False
+        try:
+            if float(sample[1]) != 0:
+                return False
+        except ValueError:
+            return False
+    return bool(samples)
+
+
+def evidence_display(record: dict) -> list[dict]:
+    """ADF nodes keep the display query literal and the exact presenter link clickable."""
+    query = record["query"]
+    if query is None:
+        parameters = urlencode([tuple(pair) for pair in record["parameters"]])
+        query = f"GET {record['path']}" + (f"?{parameters}" if parameters else "")
+    window = record["window"]
+    context = plain(record["datasource"])
+    if record["command"] == "instant":
+        context += f", at {window['start']}"
+    elif window["start"] is not None or window["end"] is not None:
+        context += f", {window['start'] or 'none'}..{window['end'] or 'none'}"
+    if record["command"] == "range":
+        context += f", step {window['step_seconds']:g}s"
+    context += f"; retrieved {record['retrieved_at']}"
+    link = record["presenter_link"]
+    destination = {"type": "text", "text": "no link"} if link is None else {
+        "type": "text", "text": "Open in Grafana",
+        "marks": [{"type": "link", "attrs": {"href": link}}],
+    }
+    return [
+        {"type": "text", "text": plain(query), "marks": [{"type": "code"}]},
+        {"type": "text", "text": f" ({plain(context)}): {plain(evidence_result(record))} "},
+        destination,
+    ]
+
+
+def investigate(key: str, observation: str, interpretation: str, unknown: str, path: Path) -> list[str]:
+    records, reason = read_evidence(path)
+    evidence = []
+    if any(record["status"] in ("ok", "empty") for record in records):
+        for record in records:
+            if evidence:
+                evidence.append({"type": "text", "text": " ; "})
+            evidence.extend(evidence_display(record))
+    else:
+        observation, interpretation = "Evidence unavailable", "No conclusion from Grafana"
+        reasons = dict.fromkeys(plain(record["error"]["message"]) for record in records)
+        evidence = [{"type": "text", "text": "unavailable: " + (reason or "; ".join(reasons))}]
+    nodes = [{"type": "text", "text": INVESTIGATION_MARKER}]
+    for label, judgment in (
+        ("Observation:", observation), ("Interpretation:", interpretation),
+        ("Unknown / next check:", unknown),
+    ):
+        nodes.extend([
+            {"type": "text", "text": label, "marks": [{"type": "strong"}]},
+            {"type": "text", "text": f" {plain(judgment)} | "},
+        ])
+    nodes.extend([
+        {"type": "text", "text": "Evidence:", "marks": [{"type": "strong"}]},
+        {"type": "text", "text": " "},
+        *evidence,
+    ])
+    comment = {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": nodes}]}
+    return [f"jira-as collaborate comment add {key} -b {quoted(compact(comment))} --format adf"]
+
+
 # --- the command line ---
 
 
@@ -642,7 +890,7 @@ def parser() -> argparse.ArgumentParser:
                 "--runs",
                 required=True,
                 type=int,
-                help="how many comments the Incident has now, the opening one included; the "
+                help="prior lifecycle comments, the opening one included; the "
                 "closing comment counts this Run as one more",
             )
             step.add_argument(
@@ -650,6 +898,9 @@ def parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="the Match is in a status a human owns: comment, and do not complete it",
             )
+    investigation = steps.add_parser("investigate", help="one evidence-grounded investigation comment")
+    for flag in ("key", "observation", "interpretation", "unknown"):
+        investigation.add_argument(f"--{flag}", required=True)
     return commands
 
 
@@ -665,6 +916,9 @@ def printed(argv: Sequence[str], working_directory: Path) -> list[str]:
     key = arguments.key.strip()
     if not re.fullmatch(rf"{facts.project}-[1-9][0-9]*", key):
         raise PayloadError(f"--key {key!r} is not an issue of {facts.project}")
+    if arguments.step == "investigate":
+        return investigate(key, arguments.observation, arguments.interpretation, arguments.unknown,
+                           working_directory / EVIDENCE_FILENAME)
     labels = match_labels(arguments.labels)
     for needed in (group.label, facts.session_label):
         if needed not in labels:

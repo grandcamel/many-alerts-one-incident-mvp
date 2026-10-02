@@ -17,7 +17,7 @@ An Alert is `firing` or `resolved`, and its `fingerprint` is its identity across
 every Notification it ever appears in. The Notification's own `status` is
 `firing` while any Alert in it fires, and `resolved` once every one of them has.
 
-You can run `jira-as` and `incident-payload`, and read files. Nothing else — no
+You can run `jira-as` and `incident-payload`<!-- investigation:start --> and `grafana-query`<!-- investigation:end -->, and read files. Nothing else — no
 writing files, no `curl`, no `date`, no other command. Every invocation below is
 one you can run as written.
 
@@ -34,7 +34,9 @@ reads `notification.json` and this project's facts itself, and prints the
 - A printed line that starts with `#` says what the next one does, or what to say
   when you finish. It is not a command.
 - If it prints a line starting `incident-payload: error:`, stop there and finish
-  `failed` with that line. Never build the command yourself instead.
+  `failed` with that line. Never build the command yourself instead.<!-- investigation:start -->
+  The `investigate` exception: its error is an investigation failure; preserve a
+  successful lifecycle and finish with investigation unavailable.<!-- investigation:end -->
 - To finish `failed` is to end with a final message whose first line is `failed: <why>`;
   the [Finish](#finish) says how, and why it must be that line.
 
@@ -171,7 +173,70 @@ What `incident-payload` fills in, so you can read the dry run against it:
 
 It sets exactly the fields [the project](#the-project) gives an id for. A field it
 says this project lacks stays off: never look for its id, never guess one.
+<!-- investigation:start -->
+### Investigate the new Incident
 
+After the create AND opening comment succeed, investigate current telemetry on
+that confirmed Incident key. Updates, repeats, related-alert updates, resolved
+Notifications and resolved-without-Match skips do not investigate; never create
+an Incident just to hold an investigation. A lifecycle failure does not investigate.
+
+These queries authenticate with a Viewer token. Grafana traffic bypasses the Jira
+Forwarder; anonymous Admin access remains on this demo stack. Presenter links open
+under the presenter's browser identity, not this Run's token.
+
+Choose your expressions and any follow-ups from the evidence. There is no required
+expression, expected result or diagnosis. The datasource defaults to `prometheus`.
+The current rules use `http_server_duration_milliseconds_count` with `service_name`
+and `http_status_code` labels; `service_name="rolldice"` selects the demo service.
+The rule called a health probe also counts completed requests, so another view of
+that metric is context, not independent reachability evidence. `checkout-outage`
+is a demonstration group label, not proof of a checkout service.
+
+```bash
+grafana-query instant --query '<expression>'
+grafana-query range --query '<expression>'
+grafana-query get --path /api/v1/labels
+grafana-query get --path /api/v1/series --param 'match[]=<selector>'
+grafana-query get --path /api/v1/metadata
+```
+
+Flags follow the subcommand. `--datasource <uid>` selects another datasource.
+Instant's `--time` defaults to `now`; range's `--start`, `--end`, and `--step`
+default to `now-10m`, `now`, and `10s`. Time accepts relative `now-Ns`, `now-Nm`,
+`now-Nh`, `now-Nd`, finite Unix seconds or RFC3339 with a timezone. Step accepts
+positive seconds or a positive value with `s`, `m`, `h`, or `d`. GET's path is
+datasource-relative; repeat `--param 'NAME=VALUE'` for parameters. It invents no
+time window. Query arguments use plain single quotes; preserve double quotes and
+backslashes in the expression inside those quotes. If an expression needs an
+apostrophe, choose an equivalent expression that fits the command boundary.
+
+Each query prints five compact summary lines and a full JSON record. Full exact
+expressions, resolved windows, retrieval times and responses append to
+`grafana-evidence.jsonl` in this Run's directory. Read it when needed; the comment
+builder reads it mechanically, so you never retype the evidence. The ten-second
+request timeout and the existing Run timeout still apply. A replay queries the
+current system: report actual query times, not a historical replay window.
+
+Keep observed zero, no data and unavailable distinct. Missing error series do not
+establish zero errors. Fresh telemetry does not establish application health;
+absent traffic does not identify why traffic stopped. Give three judgments grounded
+in the returned evidence: observation, interpretation, and unknown / next check.
+No data permits only claims of no returned data.
+
+```bash
+incident-payload investigate --key <key> --observation '<observation>' --interpretation '<interpretation>' --unknown '<unknown / next check>'
+```
+
+Call it once and run its printed Jira command exactly as printed. It supplies
+one compact ADF comment using `--format adf`, with strong labels, code-marked display queries
+and exact presenter links in explicit link marks. Its first text node is the exact
+unmarked `[grafana-investigation] ` marker. When no query succeeds, or evidence is
+missing, empty, unreadable or corrupt, it overrides
+observation and interpretation with Evidence unavailable / No conclusion from
+Grafana, keeping your unknown / next check. If the builder refuses or posting fails,
+finish the successful lifecycle with investigation unavailable as the Finish says.
+<!-- investigation:end -->
 ## Step 2b — update the Incident
 
 Read Jira's clock:
@@ -210,17 +275,31 @@ stop after adding labels and commenting: a human owns the status.
 ## Step 2c — close the Incident
 
 Every Alert in the Notification is resolved. Read Jira's clock as in
-[step 2b](#step-2b--update-the-incident), and count the Runs so far: one per
-comment on the Incident, the opening one included. The count is the `total` of
-the comment list, so ask for one comment: only the `total` matters, and each
-comment is long.
+[step 2b](#step-2b--update-the-incident), and count the Runs so far: one per prior
+lifecycle comment, the opening one included.
 
 ```bash
 jira-as -o json api call getServerInfo
-jira-as collaborate comment list <key> --limit 1 -o json
+jira-as collaborate comment list <key> --order asc --limit 200 -o json
 ```
 
-Then give `incident-payload` what step 2b does, and that `total` as the count:
+Verify that the returned comment count equals the raw `total` before counting.
+If incomplete, fetch a larger limit equal to `total`:
+
+```bash
+jira-as collaborate comment list <key> --order asc --limit <total> -o json
+```
+
+Verify completeness again. Do not guess from a partial list; a list that remains
+incomplete fails the lifecycle step. Extract each body's text by joining its ADF
+text nodes in document order (a plain string body is already text). Count only
+bodies that do not start with the exact marker `[grafana-investigation] `,
+case-sensitive, including the trailing space. A marker later in a body does not
+exclude it. Human and other unmarked comments count. This convention counts
+comments; it does not authenticate their author. It applies even after
+investigation has been disabled, since old marked comments remain on an Incident.
+
+Then give `incident-payload` what step 2b does, and that lifecycle count as `--runs`:
 
 ```bash
 incident-payload close --key <key> --labels '<label>,<label>' --created '<created>' --server-time '<serverTime>' --runs <count>
@@ -281,14 +360,29 @@ moved to {{STATUS_IN_PROGRESS}}`, `completed`, or `skipped` and why — and then
 per Alert, naming its Fingerprint and whether it was `new`, `repeat` or
 `resolved`. `incident-payload update` and `close` print both as `#` lines; after a
 create every firing Alert is `new` and every other one `resolved`.
+<!-- investigation:start -->
+A successful lifecycle always keeps `ok: ` irrespective of query, evidence-builder
+or investigation-post failure. On an enabled create, the Incident line ends with:
 
+- `; investigation recorded` when an evidence comment with at least one successful record
+  was posted, including a no-data result.
+- `; investigation unavailable (<reason>)` when all queries failed, evidence was unusable,
+  or the builder or post failed. If an unavailable comment was posted, append
+  `; unavailable-evidence comment recorded`. If posting failed, append
+  `; investigation comment could not be posted`.
+
+Use the builder's actual unavailable outcome, including corrupt evidence, rather
+than assuming an earlier query success means the evidence comment succeeded;
+never claim a failed post was recorded. Keep the Alert lines above. A lifecycle
+failure still starts `failed: ` and does not investigate.
+<!-- investigation:end -->
 A Run that failed ends differently. Its final message begins `failed: <why>`: those
 characters first, with nothing before them, then jira-as's or `incident-payload`'s
 error as the why. The Receiver and the log read that first line, and only that
 line, to mark the Run failed. These prefixes are case-sensitive: `FAILED: ` is
 not a failure marker. Always use the appropriate prefix, including for a skip.
 
-A Run ends as `failed` with the error when `incident-payload` refuses, when the dry
+A Run ends as `failed` with the error when `incident-payload` refuses<!-- investigation:start --> (except `investigate`)<!-- investigation:end -->, when the dry
 run or the create fails (the Forwarder's refusal of a create included), or when a
 close leaves the Incident done without a resolution. A Run whose create failed ends
 as `failed` with jira-as's error, and names no Incident key because there is none;

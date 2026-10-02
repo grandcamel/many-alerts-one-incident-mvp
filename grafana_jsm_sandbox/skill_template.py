@@ -145,8 +145,11 @@ def facts(project: DemoProject) -> Facts:
     )
 
 
-def render(template: str, project: DemoProject) -> str:
+def render(template: str, project: DemoProject, *, investigation_enabled: bool = False) -> str:
     """The Skill for `project`, or an error naming every placeholder it could not fill.
+
+    `investigation_enabled` includes the create-only query instructions; disabled
+    renderings omit them. Both renderings count only lifecycle comments at close.
 
     A placeholder left in a rendered Skill would reach a Run as an instruction
     to use a project called `{{PROJECT_KEY}}`, so a template that names one this
@@ -158,6 +161,12 @@ def render(template: str, project: DemoProject) -> str:
         raise SkillTemplateError(
             f"session label {project.session_label!r} is not ses-<id> with id of [a-z0-9-]{{1,32}}"
         )
+    template = re.sub(
+        r"<!-- investigation:start -->(.*?)<!-- investigation:end -->",
+        lambda section: section[1] if investigation_enabled else "",
+        template,
+        flags=re.DOTALL,
+    )
     filled = placeholders(project)
     named = PLACEHOLDER.findall(template)
     unfilled = sorted({name for name in named if not filled.get(name)})
@@ -170,7 +179,9 @@ def render(template: str, project: DemoProject) -> str:
     return PLACEHOLDER.sub(lambda placeholder: filled[placeholder[1]], template)
 
 
-def materialize(source: Path, target: Path, project: DemoProject) -> Path:
+def materialize(
+    source: Path, target: Path, project: DemoProject, *, investigation_enabled: bool = False
+) -> Path:
     """Write the whole skill directory `source`, rendered for `project`, as `target`.
 
     Whatever was at `target` goes first: a Skill rendered by an earlier start,
@@ -192,7 +203,10 @@ def materialize(source: Path, target: Path, project: DemoProject) -> Path:
         relative = path.relative_to(source)
         if path.suffix == RENDERED:
             try:
-                rendered = render(path.read_text(encoding="utf-8"), project)
+                rendered = render(
+                    path.read_text(encoding="utf-8"), project,
+                    investigation_enabled=investigation_enabled,
+                )
             except (SkillTemplateError, UnicodeDecodeError) as failure:
                 raise SkillTemplateError(f"{relative}: {failure}") from None
             contents[relative] = rendered.encode("utf-8")
