@@ -21,6 +21,16 @@ the Runs to the spec's Proof:
     5. at no point do two open Incidents share the labels: every look at the project
        counts them, and a second one is `FAIL one incident` at once.
 
+It holds what the Runs write to the Skill's templates as well (`verify_content`), in the stage
+where each fact first can be read, because a lifecycle can pass with an Incident that says
+nothing: `created` checks that the Summary names the group and the firing count and that the
+Description names each firing Alert and carries its generator URL; `grouped`, that the opening
+comment names each firing Alert with a value; `updated` and `related`, that an update comment
+lists the Alerts as New, Repeat and Resolved; `completed`, that the closing comment gives the
+duration, the Alert count and the Run count, and that the Incident has a resolution. The firing
+Alerts are the fixtures' in a replay and Grafana's Alertmanager's in live mode. A failure names
+the field, as `NOT VERIFIED: created — DEMO-1's Description 'Test' is missing: ...`.
+
     --replay  (the default) posts the four grouped Notifications under `fixtures/mvp/`:
               three related Alerts firing, the same three again, the sustained-outage Alert
               joining them, and all four resolved, each once the Incident has answered the
@@ -99,6 +109,17 @@ from grafana_jsm_sandbox.verify import (
     said,
     start_traffic,
 )
+from grafana_jsm_sandbox.verify_content import (
+    Alert,
+    classify,
+    closing_problem,
+    description_problem,
+    opening_problem,
+    path_of,
+    sorted_problem,
+    summary_problem,
+    update_problem,
+)
 
 MVP = "mvp"
 """The scenario's name, as `--mvp` selects it."""
@@ -138,6 +159,11 @@ group and the session."""
 AT_LEAST = 2
 """How many `fp-` labels the created Incident must carry: several related Alerts, not one."""
 
+COMMENT_LIMIT = "200"
+"""How many comments one `comment list` asks for. jira-as lists the newest first, and fifty at
+most, by default; the checks read the opening comment first and the closing one last, so they
+ask for the oldest first and for more than a rehearsal's Incident will ever have."""
+
 
 @dataclass(frozen=True)
 class GroupIncident(Incident):
@@ -146,20 +172,45 @@ class GroupIncident(Incident):
     labels: frozenset[str] = frozenset()
     repeat_comments: int = 0
     commented_fingerprints: frozenset[str] = frozenset()
+    summary: str = ""
+    description: str = ""
+    comment_texts: tuple[str, ...] = ()
+    """The comments' plain text, the opening one first."""
 
     @property
     def fingerprints(self) -> frozenset[str]:
         return frozenset(label for label in self.labels if label.startswith(FINGERPRINT_PREFIX))
 
 
+INLINE = {"paragraph", "heading", "codeBlock"}
+"""The ADF nodes whose children run on in one line; any other node's are lines of their own."""
+
+
 def comment_text(body: object) -> str:
-    """A Jira comment's plain text, whether the API gives a string or an ADF document."""
+    """A Jira field's plain text, whether the API gives a string or an ADF document.
+
+    Paragraphs and list items are lines of their own, and an address in a link or a card is kept
+    beside its text, so that a check for a URL finds it however the Run wrote it.
+    """
     if isinstance(body, str):
         return body
     if isinstance(body, dict):
-        if body.get("type") == "text":
-            return str(body.get("text", ""))
-        return "".join(comment_text(child) for child in body.get("content", []))
+        kind = body.get("type")
+        if kind == "text":
+            text = str(body.get("text", ""))
+            for mark in body.get("marks") or ():
+                href = (mark.get("attrs") or {}).get("href") if isinstance(mark, dict) else None
+                if isinstance(href, str) and href not in text:
+                    text += f" {href}"
+            return text
+        if kind == "hardBreak":
+            return "\n"
+        attributes = body.get("attrs")
+        url = attributes.get("url") if isinstance(attributes, dict) else None
+        parts = [comment_text(child) for child in body.get("content") or ()]
+        if isinstance(url, str):
+            parts.append(url)
+        return ("" if kind in INLINE else "\n").join(part for part in parts if part)
     return ""
 
 
@@ -256,6 +307,11 @@ class GroupWatch(Watch):
         super().__init__(world, key, f"{self.group} and {self.session}", timeouts)
         self.incident: GroupIncident | None = None
 
+    @property
+    def incident_group(self) -> str:
+        """The `incident_group` the group label is made from."""
+        return self.group.removeprefix(GROUP_PREFIX)
+
     # --- Jira, read only ---
 
     def snapshot(self) -> list[dict]:
@@ -298,34 +354,61 @@ class GroupWatch(Watch):
         return found
 
     def read(self, key: str) -> GroupIncident:
-        """`key`'s status, resolution, labels and comment count."""
+        """`key`'s status, resolution, labels, Summary, Description and comments, oldest first."""
         jira_as = self.world.jira_as
         issue = json.loads(
-            jira_as("issue", "get", key, "--fields", "status,resolution,labels", "-o", "json")
+            jira_as(
+                "issue",
+                "get",
+                key,
+                "--fields",
+                "status,resolution,labels,summary,description",
+                "-o",
+                "json",
+            )
         )
-        comments = json.loads(jira_as("collaborate", "comment", "list", key, "-o", "json"))
+        comments = json.loads(
+            jira_as(
+                "collaborate",
+                "comment",
+                "list",
+                key,
+                "--order",
+                "asc",
+                "--limit",
+                COMMENT_LIMIT,
+                "-o",
+                "json",
+            )
+        )
         try:
             fields = issue["fields"]
+            texts = tuple(
+                comment_text(comment.get("body")) for comment in comments.get("comments", [])
+            )
             incident = GroupIncident(
                 key=key,
                 status=fields["status"]["name"],
                 resolution=(fields.get("resolution") or {}).get("name"),
                 comments=int(comments.get("total", 0)),
                 labels=frozenset(fields.get("labels") or ()),
-                repeat_comments=sum(
-                    is_repeat_comment(comment.get("body"))
-                    for comment in comments.get("comments", [])
-                ),
+                repeat_comments=sum(is_repeat_comment(text) for text in texts),
                 commented_fingerprints=frozenset(
-                    label
-                    for comment in comments.get("comments", [])
-                    for label in new_fingerprints(comment.get("body"))
+                    label for text in texts for label in new_fingerprints(text)
                 ),
+                summary=comment_text(fields.get("summary")),
+                description=comment_text(fields.get("description")),
+                comment_texts=texts,
             )
         except (KeyError, TypeError, AttributeError) as failure:
             raise ValueError(
                 f"jira-as answered {key} in an unexpected shape ({failure!r})"
             ) from None
+        if len(texts) < incident.comments:
+            raise ValueError(
+                f"jira-as listed {len(texts)} of {key}'s {incident.comments} comments, "
+                f"and the checks need them all"
+            )
         self.incident = incident
         return incident
 
@@ -351,11 +434,219 @@ class GroupWatch(Watch):
         return found
 
 
+# --- What the Incident says ---
+
+CONTENT_LOGS = "check the Run's jira-as commands in `docker compose logs demo`"
+"""Where a Run that wrote the wrong words says what it ran. It did not fail, so there is no
+[FAILED] to look for."""
+
+
+class Content:
+    """The words an Incident must hold, asked in the stage where each fact first can be read.
+
+    Each method raises its stage's `NotVerified` when the words are wrong, naming the field, and
+    otherwise returns what held, for the stage's OK line. The two subclasses differ only in how
+    they learn which Alerts fired: from the fixtures in a replay, from Grafana's Alertmanager live.
+    """
+
+    def __init__(self, watch: GroupWatch) -> None:
+        self.watch = watch
+        self.opened: tuple[Alert, ...] = ()
+        """The firing Alerts the Incident was opened for, which its opening comment must name."""
+        self.created_with: frozenset[str] = frozenset()
+        """The `fp-` labels the Incident was created with: the Alerts it had seen from the start."""
+
+    def firing_at_creation(self, incident: GroupIncident) -> tuple[tuple[Alert, ...], int | None]:
+        """The firing Alerts the Incident was created for, and how many there are, None when that
+        cannot be said."""
+        raise NotImplementedError
+
+    def alert_counts(self, incident: GroupIncident) -> range | set[int]:
+        """The Alert counts a closing comment may give."""
+        raise NotImplementedError
+
+    def updated(
+        self, stage: str, incident: GroupIncident, baseline: GroupIncident, label: str | None
+    ) -> str:
+        raise NotImplementedError
+
+    def refuse(self, stage: str, incident: GroupIncident, problem: str) -> NotVerified:
+        return self.watch.fail(stage, f"{incident.key}'s {problem}; {CONTENT_LOGS}")
+
+    def created(self, incident: GroupIncident) -> str:
+        """The Summary names the group and the firing count; the Description, each Alert."""
+        alerts, firing = self.firing_at_creation(incident)
+        self.opened = alerts
+        self.created_with = incident.fingerprints
+        problem = summary_problem(
+            incident.summary, self.watch.incident_group, firing
+        ) or description_problem(incident.description, alerts)
+        if problem:
+            raise self.refuse(CREATED, incident, problem)
+        if not alerts:
+            return "the Summary names the group and the firing count"
+        return (
+            "the Summary names the group and the firing count, and the Description all "
+            f"{len(alerts)} Alerts with their generator URLs"
+        )
+
+    def opening(self, incident: GroupIncident) -> str:
+        """The opening comment, the first, names each Alert it opened from with a value."""
+        problem = opening_problem(incident.comment_texts[0], self.opened)
+        if problem:
+            raise self.refuse(GROUPED, incident, problem)
+        if not self.opened:
+            return ""
+        return f"the opening comment names the {len(self.opened)} Alerts with a value each"
+
+    def closing(self, incident: GroupIncident) -> str:
+        """The closing comment, the last, gives the duration, the Alert count and the Run count.
+        The Run count is the Incident's comments before the closing one, as the Skill counts
+        them, or with it, which is the Run that is writing."""
+        problem = closing_problem(
+            incident.comment_texts[-1],
+            self.alert_counts(incident),
+            range(incident.comments - 1, incident.comments + 1),
+        )
+        if problem:
+            raise self.refuse(COMPLETED_STAGE, incident, problem)
+        return "the closing comment gives the duration, the Alert count and the Run count"
+
+
+class Fixtures(Content):
+    """A replay's content: every Alert is in the fixture Notification the Run was posted."""
+
+    def __init__(self, watch: GroupWatch, sequence: tuple[str, ...] = MVP_SEQUENCE) -> None:
+        super().__init__(watch)
+        self.firing, self.repeat, self.related, self.resolved = sequence
+        self.everyone = tuple(alert for filename in sequence for alert in self.alerts(filename))
+
+    def alerts(self, filename: str) -> tuple[Alert, ...]:
+        """The Alerts of one fixture Notification, with the facts a Run copies from it."""
+        notification = json.loads((FIXTURES / filename).read_text())
+        return tuple(
+            Alert(
+                label=FINGERPRINT_PREFIX + alert["fingerprint"],
+                name=alert["labels"]["alertname"],
+                generator_url=alert.get("generatorURL") or None,
+                value=None
+                if alert.get("values", {}).get("A") is None
+                else str(alert["values"]["A"]),
+                resolved=alert["status"] == "resolved",
+            )
+            for alert in notification["alerts"]
+        )
+
+    def firing_at_creation(self, incident: GroupIncident) -> tuple[tuple[Alert, ...], int | None]:
+        alerts = tuple(alert for alert in self.alerts(self.firing) if not alert.resolved)
+        return alerts, len(alerts)
+
+    def alert_counts(self, incident: GroupIncident) -> range | set[int]:
+        return {len(self.alerts(self.resolved)), len(incident.fingerprints)}
+
+    def updated(
+        self, stage: str, incident: GroupIncident, baseline: GroupIncident, label: str | None
+    ) -> str:
+        """The update comment sorts this Notification's Alerts as the Skill's rule does against
+        what the Incident held before it."""
+        texts = incident.comment_texts[baseline.comments :]
+        notification = self.repeat if stage == UPDATED else self.related
+        expected = classify(self.alerts(notification), baseline.fingerprints, self.everyone)
+        problem = update_problem(texts[0], expected)
+        if problem:
+            raise self.refuse(stage, incident, problem)
+        return (
+            f"the update comment lists {len(expected.new)} new, {len(expected.repeat)} repeat "
+            f"and {len(expected.resolved)} resolved Alerts"
+        )
+
+
+class Grafana(Content):
+    """A live run's content: which Alerts fired is what Grafana's Alertmanager lists as active,
+    matched to the Incident by the `fp-` label. Their values are Grafana's to measure, so only
+    that a value is there is checked."""
+
+    def known(self) -> tuple[dict[str, Alert], str | None]:
+        """Alertmanager's active Alerts by `fp-` label, or why it cannot say."""
+        try:
+            listed = self.watch.world.grafana_alerts()
+        except GrafanaUnanswered as failure:
+            return {}, f"Grafana's Alertmanager could not be read: {failure}"
+        if not isinstance(listed, list):
+            return {}, "Grafana's Alertmanager answered something other than an Alert list"
+        known = {}
+        for alert in listed:
+            labels = alert.get("labels") if isinstance(alert, dict) else None
+            fingerprint = alert.get("fingerprint") if isinstance(alert, dict) else None
+            name = labels.get("alertname") if isinstance(labels, dict) else None
+            if isinstance(name, str) and name and isinstance(fingerprint, str) and fingerprint:
+                label = FINGERPRINT_PREFIX + fingerprint
+                known[label] = Alert(label, name, path_of(alert.get("generatorURL")))
+        return known, None
+
+    def firing_at_creation(self, incident: GroupIncident) -> tuple[tuple[Alert, ...], int | None]:
+        """The Incident's `fp-` labels that are active Alerts. The count is held only when every
+        label is one: a label of an Alert that has resolved since, or that Grafana no longer
+        lists, may or may not have been counted firing."""
+        known, why = self.known()
+        alerts = tuple(known[label] for label in sorted(incident.fingerprints) if label in known)
+        unknown = sorted(incident.fingerprints - known.keys())
+        if why:
+            self.watch.line(
+                WARN,
+                CREATED,
+                f"{why}, so the Description is not held to the Alerts' names and generator URLs, "
+                "nor the Summary to their count",
+            )
+        elif unknown:
+            self.watch.line(
+                WARN,
+                CREATED,
+                f"{', '.join(unknown)} {'is' if len(unknown) == 1 else 'are'} not among "
+                "Grafana's active Alerts: the Description is not held to "
+                f"{'it' if len(unknown) == 1 else 'them'}, and the Summary may give any firing "
+                "count",
+            )
+        return alerts, len(alerts) if alerts and not unknown else None
+
+    def alert_counts(self, incident: GroupIncident) -> range | set[int]:
+        return range(1, max(len(incident.fingerprints), 1) + 1)
+
+    def updated(
+        self, stage: str, incident: GroupIncident, baseline: GroupIncident, label: str | None
+    ) -> str:
+        """Every update comment since the baseline is in the Skill's shape, and none lists an Alert
+        the Incident held already as New: the `updated` stage's, whichever stage has just landed.
+        The sustained-outage Alert's comment lists it as New: `related`'s."""
+        texts = incident.comment_texts[baseline.comments :]
+        known, _ = self.known()
+        problem = next(filter(None, (update_problem(text) for text in texts)), None)
+        if problem is None:
+            # An Alert is seen once the Incident was created with its label, or an update comment
+            # has named it. The Skill adds a label before it posts that Alert's comment, so a
+            # baseline taken between the two holds a label whose comment is still to come, and
+            # that comment lists the Alert as New, as it should.
+            seen_labels = self.created_with | baseline.commented_fingerprints
+            seen = [known.get(old) or Alert(old, old) for old in sorted(seen_labels)]
+            others = [alert for old, alert in known.items() if old not in seen_labels]
+            problem = sorted_problem(texts, seen, None, others)
+        if problem:
+            raise self.refuse(UPDATED, incident, problem)
+        if stage == RELATED and label:
+            problem = sorted_problem(texts, [], known.get(label) or Alert(label, label))
+            if problem:
+                raise self.refuse(RELATED, incident, problem)
+        return f"{len(texts)} update comment(s) list the Alerts as New, Repeat and Resolved"
+
+
 # --- The stages ---
 
 
-def created(watch: GroupWatch, since: float, after: str) -> GroupIncident:
-    """Wait for the one Incident a Run created for the group and the session."""
+def created(
+    watch: GroupWatch, since: float, after: str, content: Content | None = None
+) -> GroupIncident:
+    """Wait for the one Incident a Run created for the group and the session, and hold its
+    Summary and Description to `content`."""
     timeout = watch.timeouts.run
     watch.line(
         WAIT,
@@ -380,11 +671,12 @@ def created(watch: GroupWatch, since: float, after: str) -> GroupIncident:
         return message
 
     incident = watch.wait_for(CREATED, since + timeout, look, timed_out)
+    held = content.created(incident) if content else ""
     watch.line(
         OK,
         CREATED,
         f"{incident.key} ({incident.status}) carries {watch.label}, {watch.elapsed(since)}s "
-        f"after {after}",
+        f"after {after}" + (f"; {held}" if held else ""),
     )
     return incident
 
@@ -396,10 +688,11 @@ def grouped(
     timeout: float,
     after: str,
     expected: frozenset[str] | None,
+    content: Content | None = None,
 ) -> GroupIncident:
     """Wait for `key` to carry the group's `fp-` labels: `expected` when the replay knows
     them, else at least `AT_LEAST`. Also wait for the opening comment before taking
-    the baseline, so it cannot pass as a repeat update."""
+    the baseline, so it cannot pass as a repeat update, and hold it to `content`."""
     wanted = (
         f"the {len(expected)} fp- labels of the posted Alerts"
         if expected
@@ -443,11 +736,13 @@ def grouped(
         return message
 
     incident = watch.wait_for(GROUPED, since + timeout, look, timed_out)
+    held = content.opening(incident) if content else ""
     watch.line(
         OK,
         GROUPED,
         f"{key} carries {len(incident.fingerprints)} fp- labels "
-        f"({', '.join(sorted(incident.fingerprints))}), {watch.elapsed(since)}s after {after}",
+        f"({', '.join(sorted(incident.fingerprints))}), {watch.elapsed(since)}s after {after}"
+        + (f"; {held}" if held else ""),
     )
     return incident
 
@@ -472,6 +767,7 @@ def updated(
     stages: tuple[str, ...],
     label: str | None = None,
     live: bool = False,
+    content: Content | None = None,
 ) -> GroupIncident:
     """Wait for the updates the Runs owe `baseline`'s Incident, in whichever order they come.
 
@@ -481,7 +777,8 @@ def updated(
     own update comment naming that fingerprint as new, while
     `updated` requires the Skill's `New: none` update comment. At least two comments
     after the creation baseline must land before traffic restarts. A health-probe
-    update cannot pass as either the repeat or the sustained-outage Alert.
+    update cannot pass as either the repeat or the sustained-outage Alert. As each stage
+    lands, `content` holds the update comments to the Skill's New, Repeat and Resolved lists.
     """
     pending = list(stages)
     key = baseline.key
@@ -521,12 +818,14 @@ def updated(
         if UPDATED in pending and repeated:
             landed = True
             pending.remove(UPDATED)
+            held = content.updated(UPDATED, incident, baseline, label) if content else ""
             watch.line(
                 OK,
                 UPDATED,
                 f"{key} has a new comment ({incident.comments} now) and is {incident.status}, "
                 f"{watch.elapsed(since)}s after {after}; still the one Incident"
-                + ("; New: none repeat and at least two update comments" if live else ""),
+                + ("; New: none repeat and at least two update comments" if live else "")
+                + (f"; {held}" if held else ""),
             )
             if incident.status != watch.project.status_in_progress:
                 watch.line(
@@ -547,11 +846,12 @@ def updated(
         ):
             landed = True
             pending.remove(RELATED)
+            held = content.updated(RELATED, incident, baseline, label) if content else ""
             watch.line(
                 OK,
                 RELATED,
                 f"{key} gained {', '.join(sorted(added))} with a comment, "
-                f"{watch.elapsed(since)}s after {after}",
+                f"{watch.elapsed(since)}s after {after}" + (f"; {held}" if held else ""),
             )
         return incident if landed else None
 
@@ -591,9 +891,14 @@ def updated(
 
 
 def completed(
-    watch: GroupWatch, baseline: GroupIncident, since: float, after: str
+    watch: GroupWatch,
+    baseline: GroupIncident,
+    since: float,
+    after: str,
+    content: Content | None = None,
 ) -> GroupIncident:
-    """Wait for the Resolved's Run to complete the Incident, with a resolution (Proof 4)."""
+    """Wait for the Resolved's Run to complete the Incident, with a resolution (Proof 4) and a
+    closing comment that `content` holds to the Skill's."""
     key = baseline.key
     timeout = watch.timeouts.run
     watch.line(
@@ -624,23 +929,23 @@ def completed(
             "Incident stays in the Incidents queue, and closing it would leave it there for good",
             (RESOLUTION_SCREEN,),
         )
+    if incident.comments <= baseline.comments:
+        raise watch.fail(
+            COMPLETED_STAGE,
+            f"{key} has no closing comment: the Resolved's Run completed it without one; {LOGS}",
+        )
+    held = content.closing(incident) if content else ""
     watch.line(
         OK,
         COMPLETED_STAGE,
         f"{key} is {watch.project.status_done} with resolution {incident.resolution}, "
-        f"{watch.elapsed(since)}s after {after}",
+        f"{watch.elapsed(since)}s after {after}" + (f"; {held}" if held else ""),
     )
     if incident.resolution != RESOLUTION:
         watch.line(
             WARN,
             COMPLETED_STAGE,
             f"the resolution is {incident.resolution}, not {RESOLUTION}, which the Skill sets",
-        )
-    if incident.comments <= baseline.comments:
-        watch.line(
-            WARN,
-            COMPLETED_STAGE,
-            f"{key} has no closing comment: the Resolved's Run completed it without one; {LOGS}",
         )
     return incident
 
@@ -667,10 +972,17 @@ def replayed(watch: GroupWatch, receiver: str) -> Verified:
     """The grouped Notifications, each posted once the Incident has answered the one before."""
     firing, repeat, related, resolved = MVP_SEQUENCE
     run = watch.timeouts.run
+    content = Fixtures(watch)
     posted = post_notification(watch, receiver, firing)
-    incident = created(watch, posted, "posting the grouped Firing")
+    incident = created(watch, posted, "posting the grouped Firing", content)
     first = grouped(
-        watch, incident.key, posted, run, "posting the grouped Firing", fingerprints_in(firing)
+        watch,
+        incident.key,
+        posted,
+        run,
+        "posting the grouped Firing",
+        fingerprints_in(firing),
+        content,
     )
     posted = post_notification(watch, receiver, repeat)
     incident = updated(
@@ -681,6 +993,7 @@ def replayed(watch: GroupWatch, receiver: str) -> Verified:
         "posting the repeat",
         f"its Run failed, never ran, or created instead of updating; {LOGS}",
         (UPDATED,),
+        content=content,
     )
     posted = post_notification(watch, receiver, related)
     new_labels = fingerprints_in(related) - fingerprints_in(firing)
@@ -695,10 +1008,13 @@ def replayed(watch: GroupWatch, receiver: str) -> Verified:
         f"its Run failed, or updated without adding the label; {LOGS}",
         (RELATED,),
         label,
+        content=content,
     )
     added = ", ".join(sorted(incident.fingerprints - before_related.fingerprints))
     posted = post_notification(watch, receiver, resolved)
-    return Verified(first, added, completed(watch, incident, posted, "posting the Resolved"))
+    return Verified(
+        first, added, completed(watch, incident, posted, "posting the Resolved", content)
+    )
 
 
 def live(watch: GroupWatch) -> Verified:
@@ -729,7 +1045,8 @@ def live(watch: GroupWatch) -> Verified:
         watch.line(
             OK, FIRING, f"Grafana's rule is Firing, {watch.elapsed(stopped)}s after the stop"
         )
-        incident = created(watch, firing, "the Firing")
+        content = Grafana(watch)
+        incident = created(watch, firing, "the Firing", content)
         # The first Notification carries two Alerts; probe and sustained outage join
         # on later group intervals. Wait for the opening comment before the baseline.
         first = grouped(
@@ -739,6 +1056,7 @@ def live(watch: GroupWatch) -> Verified:
             timeouts.firing + timeouts.run,
             "it was created",
             None,
+            content,
         )
         incident = updated(
             watch,
@@ -751,6 +1069,7 @@ def live(watch: GroupWatch) -> Verified:
             f"failed; {LOGS}",
             (UPDATED, RELATED),
             live=True,
+            content=content,
         )
         added = ", ".join(sorted(incident.fingerprints - first.fingerprints))
         restarted = start_traffic(watch)
@@ -768,7 +1087,9 @@ def live(watch: GroupWatch) -> Verified:
         watch.line(
             OK, NORMAL, f"Grafana's rule is Normal, {watch.elapsed(restarted)}s after the start"
         )
-        return Verified(first, added, completed(watch, incident, normal, "Grafana went Normal"))
+        return Verified(
+            first, added, completed(watch, incident, normal, "Grafana went Normal", content)
+        )
     finally:
         if not attempted:
             watch.line(

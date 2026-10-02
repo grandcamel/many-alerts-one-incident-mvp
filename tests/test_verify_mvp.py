@@ -7,25 +7,39 @@ Run that changes the fake project the way Skill v2 says: create one Incident wit
 group, session and `fp-` labels, add labels and a comment on an update, complete on the
 Resolved. jira-as is that project answering the read-only calls `verify` makes. Each
 failure a test needs is a switch on the simulation: a Run that creates a second Incident,
-one that comments without adding the label, one that never comes.
+one that comments without adding the label, one that never comes, one that leaves the
+Description as `Test`. What the Runs write is the Skill's templates, filled in from the
+fixtures' Alerts, so the content checks have something well formed to pass.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shlex
 import urllib.error
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
-from grafana_jsm_sandbox import replay, verify, verify_mvp
+from grafana_jsm_sandbox import replay, verify, verify_content, verify_mvp
 from grafana_jsm_sandbox.demo_config import DemoProject
 from grafana_jsm_sandbox.doctor import GrafanaUnanswered
-from grafana_jsm_sandbox.notification import validate_notification
+from grafana_jsm_sandbox.notification import NOTIFICATION_FILENAME, validate_notification
 from grafana_jsm_sandbox.replay import FIXTURES
+from grafana_jsm_sandbox.run_command import RENDERED_SKILL
 from grafana_jsm_sandbox.verify import Timeouts, World, main
+from grafana_jsm_sandbox.verify_content import (
+    Alert,
+    classify,
+    closing_problem,
+    description_problem,
+    opening_problem,
+    shown,
+    summary_problem,
+    update_problem,
+)
 from grafana_jsm_sandbox.verify_mvp import (
     GROUP_LABELLED,
     GROUP_MATCH,
@@ -55,6 +69,83 @@ FIRING, REPEAT, RELATED, RESOLVED = MVP_SEQUENCE
 GROUP_LABELS = labels_in(FIRING)
 ALL_LABELS = labels_in(RELATED)
 RELATED_LABEL = (set(ALL_LABELS) - set(GROUP_LABELS)).pop()
+ALERTS = {f"fp-{alert['fingerprint']}": alert for alert in fixture(RELATED)["alerts"]}
+"""The group's four Alerts, firing, by the `fp-` label each gives the Incident."""
+
+
+def name_of(label: str) -> str:
+    return ALERTS[label]["labels"]["alertname"]
+
+
+def value_of(label: str) -> object:
+    return ALERTS[label]["values"]["A"]
+
+
+def paragraph(text: str) -> dict:
+    return {"type": "paragraph", "content": [{"type": "text", "text": text}]}
+
+
+def summary_of(labels: list[str]) -> str:
+    return f"{GROUP}: {len(labels)} alerts firing on rolldice"
+
+
+def description_of(labels: list[str], urls: bool = True) -> dict:
+    """The Description a Run writes: a heading, then a bullet per firing Alert, as ADF."""
+    bullets = [
+        {
+            "type": "listItem",
+            "content": [
+                paragraph(
+                    f"{name_of(label)} on {ALERTS[label]['labels']['instance']}: "
+                    f"{ALERTS[label]['annotations']['summary']}. value={value_of(label)}, "
+                    f"since {ALERTS[label]['startsAt']}."
+                    + (f" {ALERTS[label]['generatorURL']}" if urls else "")
+                )
+            ],
+        }
+        for label in labels
+    ]
+    return {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            paragraph(f"Partial Report: {len(labels)} alerts firing in group {GROUP}."),
+            {"type": "bulletList", "content": bullets},
+        ],
+    }
+
+
+def opening_of(labels: list[str], values: bool = True, wrong: bool = False) -> str:
+    named = "; ".join(
+        name_of(label)
+        + (f" value={value_of(label) + 7 if wrong else value_of(label)}" if values else "")
+        for label in labels
+    )
+    return f"Opened from {len(labels)} firing Alerts in {GROUP}: {named}."
+
+
+def update_of(labels: list[str], seen: list[str]) -> str:
+    """The update comment: each Alert under New when the Incident has not seen it, else Repeat."""
+    new = "; ".join(
+        f"{name_of(label)} ({label}) value={value_of(label)}"
+        for label in labels
+        if label not in seen
+    )
+    repeat = "; ".join(
+        f"{name_of(label)} value={value_of(label)}" for label in labels if label in seen
+    )
+    return (
+        f"Update: {len(labels)} firing. New: {new or 'none'}. Repeat: {repeat or 'none'}. "
+        "Resolved: none. Open for 1m5s."
+    )
+
+
+def closing_of(alerts: int, runs: int) -> str:
+    return (
+        f"Resolved after 9m: every Alert in {GROUP} is resolved ({alerts} Alerts, {runs} Runs). "
+        "Completed automatically from the Grafana Notification."
+    )
+
 
 LINE = re.compile(
     r"^\[\+\d+s\] (WAIT|OK|WARN|FAIL|NOTE) "
@@ -75,6 +166,8 @@ FIRING_AFTER = 65.0
 GROUP_WAIT = 10.0
 RELATED_AFTER = 120.0
 """Seconds after the group's first Notification that the sustained-outage Alert joins it."""
+PROBE_AFTER = 30.0
+"""Seconds after the first two rules fire that the health-probe rule does."""
 REPEAT_EVERY = 180.0
 """The policy's repeat interval (spec: 3m)."""
 NORMAL_AFTER = 15.0
@@ -91,6 +184,9 @@ class FakeIncident:
     comments: int = 0
     bodies: list[str] = field(default_factory=list)
     created: float = 0.0
+    summary: str = ""
+    description: dict | None = None
+    opening: str = ""
 
 
 @dataclass
@@ -139,6 +235,21 @@ class GroupDemo:
     update_lands_on: str = "Work in progress"
     resolve_screen_drops_resolution: bool = False
     no_closing_comment: bool = False
+    placeholder_description: bool = False
+    """The Haiku take: the Incident is complete in every way but its Description is `Test`."""
+    summary_override: str | None = None
+    description_without_urls: bool = False
+    description_without_the_last_alert: bool = False
+    reordered: bool = False
+    """Every list of Alerts a Run writes is in the reverse of the Notification's order."""
+    opening_without_values: bool = False
+    opening_wrong_value: bool = False
+    update_override: dict[str, str] = field(default_factory=dict)
+    """What a Run writes as the update comment for a Notification, by its kind: `repeat`,
+    `related` or `probe`, in place of the template's."""
+    closing_override: str | None = None
+    alertmanager_hides: set[str] = field(default_factory=set)
+    """`fp-` labels of Alerts that are firing, which Grafana's Alertmanager does not list."""
 
     # jira-as
     jira_as_fails: int = 0
@@ -218,15 +329,33 @@ class GroupDemo:
     def grafana_alerts(self) -> list[dict]:
         if self.alertmanager_down:
             raise GrafanaUnanswered("Alertmanager answered 503")
-        if self.stopped_at is None or self.related_never_fires:
+        if self.stopped_at is None:
             return []
-        if self.clock.now() < self.stopped_at + FIRING_AFTER + GROUP_WAIT + self.related_after:
-            return []
+        now = self.clock.now()
+        active = []
+        if now >= self.stopped_at + FIRING_AFTER:
+            active += GROUP_LABELS[:2]
+        if now >= self.stopped_at + FIRING_AFTER + PROBE_AFTER:
+            active += GROUP_LABELS[2:]
+        if (
+            not self.related_never_fires
+            and now >= self.stopped_at + FIRING_AFTER + GROUP_WAIT + self.related_after
+        ):
+            active.append(RELATED_LABEL)
         return [
             {
-                "labels": {"alertname": verify_mvp.SUSTAINED_TITLE, "incident_group": GROUP},
-                "fingerprint": RELATED_LABEL.removeprefix("fp-"),
+                "labels": {
+                    "alertname": name_of(label),
+                    "incident_group": GROUP,
+                    "service": "rolldice",
+                },
+                "fingerprint": label.removeprefix("fp-"),
+                # Alertmanager knows the Alert by the address Grafana reaches itself at, which
+                # is not the host the Notification gives a Run.
+                "generatorURL": ALERTS[label]["generatorURL"].replace("localhost", "grafana"),
             }
+            for label in active
+            if label not in self.alertmanager_hides
         ]
 
     def jira_as(self, *arguments: str) -> str:
@@ -238,7 +367,15 @@ class GroupDemo:
         match arguments:
             case ("search", "jql", jql, "--fields", "key,status,labels", "-o", "json"):
                 return json.dumps({"issues": self._search(jql), "isLast": True})
-            case ("issue", "get", key, "--fields", "status,resolution,labels", "-o", "json"):
+            case (
+                "issue",
+                "get",
+                key,
+                "--fields",
+                "status,resolution,labels,summary,description",
+                "-o",
+                "json",
+            ):
                 incident = self.incidents[key]
                 resolution = incident.resolution and {"name": incident.resolution}
                 return json.dumps(
@@ -255,14 +392,31 @@ class GroupDemo:
                             },
                             "resolution": resolution,
                             "labels": list(incident.labels),
+                            "summary": incident.summary,
+                            "description": incident.description,
                         },
                     }
                 )
-            case ("collaborate", "comment", "list", key, "-o", "json"):
+            case (
+                "collaborate",
+                "comment",
+                "list",
+                key,
+                "--order",
+                order,
+                "--limit",
+                _,
+                "-o",
+                "json",
+            ):
+                # jira-as lists the newest first unless it is asked for the oldest.
+                bodies = list(self.incidents[key].bodies)
+                if order == "desc":
+                    bodies.reverse()
                 return json.dumps(
                     {
                         "total": self.incidents[key].comments,
-                        "comments": [{"body": body} for body in self.incidents[key].bodies],
+                        "comments": [{"body": body} for body in bodies],
                     }
                 )
         raise AssertionError(f"verify only reads, and asked jira-as for {arguments}")
@@ -272,7 +426,9 @@ class GroupDemo:
     def add(self, status: str, labels: list[str], resolution: str | None = None) -> str:
         key = f"{KEY}-{self.next_number}"
         self.next_number += 1
-        self.incidents[key] = FakeIncident(status, labels, resolution, comments=1)
+        self.incidents[key] = FakeIncident(
+            status, labels, resolution, comments=1, bodies=["an earlier Run's comment"]
+        )
         return key
 
     def _firing_at(self) -> float | None:
@@ -329,7 +485,7 @@ class GroupDemo:
                 and self.clock.now() >= incident.created + self.opening_delay
             ):
                 incident.comments = 1
-                incident.bodies.append("Opened from firing Alerts.")
+                incident.bodies.append(incident.opening)
         notifications = self._notifications()
         while self._runs_done < len(notifications):
             when, kind, labels = notifications[self._runs_done]
@@ -353,7 +509,11 @@ class GroupDemo:
         if kind == "resolved":
             if match:
                 incident = self.incidents[match[0]]
-                incident.comments += 0 if self.no_closing_comment else 1
+                if not self.no_closing_comment:
+                    incident.bodies.append(
+                        self.closing_override or closing_of(len(labels), incident.comments)
+                    )
+                    incident.comments += 1
                 incident.status = self.project.status_done
                 if not self.resolve_screen_drops_resolution:
                     incident.resolution = "Done"
@@ -361,23 +521,41 @@ class GroupDemo:
         if not match or (self.misses_match_on_update and kind != "firing"):
             created = labels[:1] if self.creates_with_one_label else labels
             key = self.add(self.project.status_open, [GRP, self.session_created, *created])
-            self.incidents[key].comments = 0
-            self.incidents[key].created = when
+            incident = self.incidents[key]
+            incident.comments = 0
+            incident.bodies = []
+            incident.created = when
+            self._write(incident, labels)
             if self.duplicate_create:
                 self.add(self.project.status_open, [GRP, self.session_created, *created])
             return
         incident = self.incidents[match[0]]
-        new = set(labels) - set(incident.labels)
+        seen = list(incident.labels)
         if not self.no_related_label:
             incident.labels += [label for label in labels if label not in incident.labels]
         incident.comments += 0 if self.no_update_comment else 1
         if not self.no_update_comment:
             incident.bodies.append(
-                f"Update: {len(labels)} firing. New: {', '.join(sorted(new)) or 'none'}. "
-                "Repeat: existing alerts. Resolved: none. Open for 1m."
+                self.update_override.get(kind) or update_of(self._order(labels), seen)
             )
         if incident.status == self.project.status_open:
             incident.status = self.update_lands_on
+
+    def _order(self, labels: list[str]) -> list[str]:
+        return list(reversed(labels)) if self.reordered else labels
+
+    def _write(self, incident: FakeIncident, labels: list[str]) -> None:
+        """What the creating Run writes: the Summary, the Description and the opening comment."""
+        shown = self._order(labels)
+        incident.summary = self.summary_override or summary_of(labels)
+        if self.placeholder_description:
+            incident.description = {"type": "doc", "version": 1, "content": [paragraph("Test")]}
+        else:
+            described = shown[:-1] if self.description_without_the_last_alert else shown
+            incident.description = description_of(described, urls=not self.description_without_urls)
+        incident.opening = opening_of(
+            shown, values=not self.opening_without_values, wrong=self.opening_wrong_value
+        )
 
     def _search(self, jql: str) -> list[dict]:
         labelled = re.findall(r'labels = "([^"]+)"', jql)
@@ -438,6 +616,8 @@ def assert_read_only(demo: GroupDemo) -> None:
             "comment",
             "list",
         ), call
+        if call[:3] == ("collaborate", "comment", "list"):
+            assert call[4:6] == ("--order", "asc"), "jira-as lists the newest first by default"
 
 
 def ok_stages(out: list[str]) -> list[str]:
@@ -732,13 +912,16 @@ def test_completed_without_a_resolution_names_the_resolve_screen_request(demo):
     assert_documented(out)
 
 
-def test_a_missing_closing_comment_is_a_warning_not_a_failure(demo):
+def test_a_missing_closing_comment_fails_completed(demo):
     demo.no_closing_comment = True
 
     status, out = run(demo)
 
-    assert status == 0
-    assert f"{KEY}-1 has no closing comment" in line(out, "WARN", "completed")
+    assert status == 1
+    failed = line(out, "FAIL", "completed")
+    assert f"{KEY}-1 has no closing comment" in failed
+    assert out[-1] == f"NOT VERIFIED: completed — {failed.split(' — ', 1)[1]}"
+    assert_documented(out)
 
 
 def test_an_incident_created_under_another_session_label_is_pointed_out(demo):
@@ -1356,3 +1539,1022 @@ def test_a_reworded_update_comment_still_counts():
     assert new_fingerprints("Added the sustained outage alert fp-5a0f3e to this Incident.") == {
         "fp-5a0f3e"
     }
+
+
+# --- The content: what the Runs write, held to the Skill's templates ---
+
+
+def failure_of(out: list[str], stage: str) -> str:
+    """The sentence a FAIL line gives, which NOT VERIFIED repeats."""
+    failed = line(out, "FAIL", stage)
+    assert out[-1] == f"NOT VERIFIED: {stage} — {failed.split(' — ', 1)[1]}"
+    return failed.split(" — ", 1)[1]
+
+
+def test_every_stage_says_what_content_it_held(demo):
+    status, out = run(demo)
+
+    assert status == 0, out
+    assert (
+        "the Summary names the group and the firing count, and the Description all 3 Alerts "
+        "with their generator URLs"
+    ) in line(out, "OK", "created")
+    assert "the opening comment names the 3 Alerts with a value each" in line(out, "OK", "grouped")
+    assert "the update comment lists 0 new, 3 repeat and 0 resolved Alerts" in line(
+        out, "OK", "updated"
+    )
+    assert "the update comment lists 1 new, 3 repeat and 0 resolved Alerts" in line(
+        out, "OK", "related"
+    )
+    assert ("the closing comment gives the duration, the Alert count and the Run count") in line(
+        out, "OK", "completed"
+    )
+    assert not any(" WARN " in text for text in out)
+
+
+def test_the_haiku_incident_with_only_test_as_its_description_is_not_verified(demo):
+    """The lifecycle is complete: the labels, the opening comment, the transitions and the
+    resolution are all there. Only the Description is a placeholder."""
+    demo.placeholder_description = True
+
+    status, out = run(demo)
+
+    assert status == 1
+    failed = failure_of(out, "created")
+    assert f"{KEY}-1's Description 'Test' is missing: " in failed
+    for label in GROUP_LABELS:
+        assert f"{name_of(label)} (name and generator URL)" in failed
+    assert demo.posted == [FIRING], "nothing more is posted after the failed stage"
+    assert set(demo.incidents[f"{KEY}-1"].labels) == {GRP, SES, *GROUP_LABELS}
+    assert f"{KEY}-1 is left Open" in line(out, "NOTE", "cleanup")
+    assert_documented(out)
+
+
+@pytest.mark.parametrize(
+    ("summary", "lacks"),
+    [
+        ("Test", "the group checkout-outage and the firing count (3)"),
+        (GROUP, "the firing count (3)"),
+        ("rolldice: 3 alerts firing", "the group checkout-outage"),
+        (f"{GROUP}: 2 alerts firing", "the firing count (3)"),
+        (f"{GROUP}: 13 alerts firing", "the firing count (3)"),
+        (" ", "the group checkout-outage and the firing count (3)"),
+    ],
+)
+def test_a_summary_without_the_group_or_the_firing_count_fails_created(demo, summary, lacks):
+    demo.summary_override = summary
+
+    status, out = run(demo)
+
+    assert status == 1
+    failed = failure_of(out, "created")
+    assert f"{KEY}-1's Summary" in failed
+    assert f" lacks {lacks}: it reads like 'checkout-outage: 3 alerts firing'" in failed
+
+
+def test_a_description_without_the_generator_urls_names_each_missing_one(demo):
+    demo.description_without_urls = True
+
+    status, out = run(demo)
+
+    assert status == 1
+    failed = failure_of(out, "created")
+    assert f"{KEY}-1's Description" in failed
+    assert f"{name_of(GROUP_LABELS[0])} (generator URL)" in failed
+    assert "(name" not in failed, "every Alert is named; only the addresses are missing"
+
+
+def test_a_description_that_leaves_an_alert_out_names_it(demo):
+    demo.description_without_the_last_alert = True
+
+    status, out = run(demo)
+
+    assert status == 1
+    failed = failure_of(out, "created")
+    assert f"{name_of(GROUP_LABELS[-1])} (name and generator URL)" in failed
+    assert name_of(GROUP_LABELS[0]) not in failed.split("is missing:")[1]
+
+
+def test_alerts_in_another_order_still_pass_every_check(demo):
+    demo.reordered = True
+
+    status, out = run(demo)
+
+    assert status == 0, out
+    first_bullet = demo.incidents[f"{KEY}-1"].description["content"][1]["content"][0]
+    assert name_of(GROUP_LABELS[-1]) in first_bullet["content"][0]["content"][0]["text"]
+    assert (
+        demo.incidents[f"{KEY}-1"].bodies[0].split(": ", 1)[1].startswith(name_of(GROUP_LABELS[-1]))
+    )
+
+
+def test_an_opening_comment_without_values_fails_grouped(demo):
+    demo.opening_without_values = True
+
+    status, out = run(demo)
+
+    assert status == 1
+    assert line(out, "OK", "created"), "the Description was fine"
+    failed = failure_of(out, "grouped")
+    assert f"{KEY}-1's opening comment" in failed
+    assert f"{name_of(GROUP_LABELS[0])} (value=<number>)" in failed
+    assert demo.posted == [FIRING]
+
+
+def test_an_opening_comment_with_another_alerts_value_names_both_in_a_replay(demo):
+    demo.opening_wrong_value = True
+
+    status, out = run(demo)
+
+    assert status == 1
+    failed = failure_of(out, "grouped")
+    assert f"{name_of(GROUP_LABELS[0])} (value=0, not 7)" in failed
+
+
+REPEAT_COMMENT = update_of(GROUP_LABELS, GROUP_LABELS)
+"""The repeat's update comment as the template gives it."""
+THREE_NAMES = ", ".join(sorted(name_of(label) for label in GROUP_LABELS))
+
+
+@pytest.mark.parametrize(
+    ("text", "said"),
+    [
+        (
+            (
+                f"Update: 3 firing. New: {', '.join(name_of(label) for label in GROUP_LABELS)}. "
+                "Repeat: none. Resolved: none. Open for 1m."
+            ),
+            f"New lists {THREE_NAMES}, not none",
+        ),
+        (
+            "Update: 3 firing. New: none. Repeat: none. Resolved: none. Open for 1m.",
+            f"Repeat lists none, not {THREE_NAMES}",
+        ),
+        (REPEAT_COMMENT.replace("Resolved: none. ", ""), "no `Resolved:`"),
+        (REPEAT_COMMENT.replace("Update: 3 firing. ", ""), "no `Update: <n> firing`"),
+        (REPEAT_COMMENT.replace("Open for 1m5s.", "Open since 1m5s."), "no `Open for <duration>`"),
+        (
+            REPEAT_COMMENT.replace("Update: 3 firing", "Update: 2 firing"),
+            "`Update: 2 firing`, not 3",
+        ),
+        (
+            REPEAT_COMMENT.replace(
+                f"Repeat: {name_of(GROUP_LABELS[0])}",
+                f"Repeat: {name_of(RELATED_LABEL)}; {name_of(GROUP_LABELS[0])}",
+            ),
+            f"Repeat lists {THREE_NAMES.split(', ')[0]}",
+        ),
+    ],
+)
+def test_an_update_comment_that_sorts_the_alerts_wrongly_fails_updated_naming_the_list(
+    demo, text, said
+):
+    demo.update_override = {"repeat": text}
+
+    status, out = run(demo)
+
+    assert status == 1
+    failed = failure_of(out, "updated")
+    assert f"{KEY}-1's update comment" in failed
+    assert said in failed
+    assert demo.posted == [FIRING, REPEAT]
+
+
+def test_the_sustained_alert_listed_as_a_repeat_instead_of_new_fails_related(demo):
+    names = "; ".join(f"{name_of(label)} value={value_of(label)}" for label in ALL_LABELS)
+    demo.update_override = {
+        "related": f"Update: 4 firing. New: none. Repeat: {names}. Resolved: none. Open for 2m."
+    }
+
+    status, out = run(demo)
+
+    assert status == 1
+    assert line(out, "OK", "updated")
+    failed = failure_of(out, "related")
+    assert f"New lists none, not {name_of(RELATED_LABEL)}" in failed
+
+
+@pytest.mark.parametrize(
+    ("text", "said"),
+    [
+        (
+            "Completed automatically from the Grafana Notification.",
+            "no `Resolved after <duration>`; no `(<n> Alerts, <m> Runs)`",
+        ),
+        (
+            f"Resolved after 9m: every Alert in {GROUP} is resolved.",
+            "no `(<n> Alerts, <m> Runs)`",
+        ),
+        (closing_of(4, 3).replace("Resolved after 9m", "Resolved"), "no `Resolved after"),
+        (closing_of(3, 3), "3 Alerts, not 4"),
+        (closing_of(4, 9), "9 Runs, not 3 to 4"),
+        (closing_of(4, 2), "2 Runs, not 3 to 4"),
+    ],
+)
+def test_a_closing_comment_without_the_duration_or_the_counts_fails_completed(demo, text, said):
+    demo.closing_override = text
+
+    status, out = run(demo)
+
+    assert status == 1
+    failed = failure_of(out, "completed")
+    assert f"{KEY}-1's closing comment" in failed
+    assert said in failed
+    assert "OK completed" not in " ".join(out)
+
+
+@pytest.mark.parametrize("runs", [3, 4])
+def test_the_run_count_is_the_comments_before_the_closing_one_or_with_it(demo, runs):
+    demo.closing_override = closing_of(4, runs)
+
+    status, out = run(demo)
+
+    assert status == 0, out
+
+
+def test_a_closing_comment_whose_duration_is_spelled_out_still_counts(demo):
+    demo.closing_override = (
+        f"Resolved after 9 minutes 30 seconds: every Alert in {GROUP} is resolved "
+        "(4 Alerts, 3 Runs)."
+    )
+
+    status, out = run(demo)
+
+    assert status == 0, out
+
+
+def test_a_done_incident_without_a_resolution_fails_before_its_comment_is_read(demo):
+    demo.resolve_screen_drops_resolution = True
+    demo.closing_override = "closed"
+
+    status, out = run(demo)
+
+    assert status == 1
+    failed = line(out, "FAIL", "completed")
+    assert f"{KEY}-1 is Completed without a resolution" in failed
+    assert "closing comment" not in failed
+    assert out[-1].startswith("NOT VERIFIED: completed — ")
+
+
+def test_a_run_that_lists_comments_newest_first_is_not_taken_for_the_opening_one(demo):
+    """jira-as lists the newest comment first unless it is asked for the oldest."""
+    watch = verify_mvp.GroupWatch(demo.world([]), KEY, GROUP, SESSION, Timeouts())
+    status, _ = run(demo)
+    assert status == 0
+    asked = [call for call in demo.jira_calls if call[:3] == ("collaborate", "comment", "list")]
+    assert asked and all(call[4:8] == ("--order", "asc", "--limit", "200") for call in asked)
+    read = watch.read(f"{KEY}-1")
+    assert read.comment_texts[0].startswith("Opened from 3 firing Alerts")
+    assert read.comment_texts[-1].startswith("Resolved after")
+
+
+def test_a_comment_list_shorter_than_its_total_is_not_checked_on_a_guess(demo):
+    status, _ = run(demo)
+    assert status == 0
+    shorter = demo.jira_as
+
+    def jira_as(*arguments: str) -> str:
+        answer = shorter(*arguments)
+        if arguments[:3] == ("collaborate", "comment", "list"):
+            listed = json.loads(answer)
+            listed["comments"] = listed["comments"][:2]
+            return json.dumps(listed)
+        return answer
+
+    demo.jira_as = jira_as
+    watch = verify_mvp.GroupWatch(demo.world([]), KEY, GROUP, SESSION, Timeouts())
+    with pytest.raises(ValueError, match="listed 2 of SANDBOX-1's 4 comments"):
+        watch.read(f"{KEY}-1")
+
+
+# --- The content, live: the Alerts are Grafana's Alertmanager's ---
+
+
+def test_live_holds_the_description_to_the_alerts_grafana_lists(demo):
+    demo.description_without_the_last_alert = True
+
+    status, out = run(demo, verify.LIVE)
+
+    assert status == 1
+    failed = failure_of(out, "created")
+    assert f"{name_of(GROUP_LABELS[1])} (name and generator URL)" in failed
+    assert demo.compose_calls == [("stop", "traffic"), ("start", "traffic")]
+
+
+def test_live_takes_the_generator_url_as_the_notification_gives_it_not_as_grafana_does(demo):
+    """Alertmanager reports `http://grafana:3000/...` where a Run's Notification says
+    `http://localhost:3000/...`; the address after the host is what must be there."""
+    status, out = run(demo, verify.LIVE)
+
+    assert status == 0, out
+    [issue] = demo.incidents.values()
+    assert "http://localhost:3000/alerting/grafana/" in json.dumps(issue.description)
+    assert all(
+        "http://grafana:3000/alerting/grafana/" in alert["generatorURL"]
+        for alert in demo.grafana_alerts()
+    )
+
+
+def test_live_with_a_placeholder_description_is_not_verified_and_the_traffic_starts_again(demo):
+    demo.placeholder_description = True
+
+    status, out = run(demo, verify.LIVE)
+
+    assert status == 1
+    assert "Description 'Test' is missing" in failure_of(out, "created")
+    assert demo.compose_calls == [("stop", "traffic"), ("start", "traffic")]
+    assert stages(out)[-2:] == [("OK", "traffic started"), ("NOTE", "cleanup")]
+
+
+def test_live_warns_when_alertmanager_cannot_say_which_alerts_fired(demo):
+    demo.alertmanager_down = True
+
+    status, out = run(demo, verify.LIVE)
+
+    assert status == 1
+    warned = line(out, "WARN", "created")
+    assert "Grafana's Alertmanager could not be read" in warned
+    assert "not held to the Alerts' names and generator URLs" in warned
+    assert "Alertmanager answered 503" in line(out, "FAIL", "related")
+
+
+def test_live_does_not_hold_the_count_to_an_alert_grafana_does_not_list(demo):
+    demo.alertmanager_hides = {GROUP_LABELS[1]}
+    demo.summary_override = f"{GROUP}: 5 alerts firing"
+
+    status, out = run(demo, verify.LIVE)
+
+    assert status == 0, out
+    warned = line(out, "WARN", "created")
+    assert f"{GROUP_LABELS[1]} is not among Grafana's active Alerts" in warned
+    assert "the Description is not held to it, and the Summary may give any firing count" in warned
+
+
+def test_live_wants_a_count_in_the_summary_even_when_it_cannot_say_which(demo):
+    demo.alertmanager_hides = {GROUP_LABELS[1]}
+    demo.summary_override = GROUP
+
+    status, out = run(demo, verify.LIVE)
+
+    assert status == 1
+    assert "lacks the firing count" in failure_of(out, "created")
+
+
+def test_live_alerts_in_another_order_still_pass(demo):
+    demo.reordered = True
+
+    status, out = run(demo, verify.LIVE)
+
+    assert status == 0, out
+
+
+def test_live_an_alert_the_incident_held_already_is_never_new(demo):
+    probe = (
+        f"Update: 3 firing. New: {name_of(GROUP_LABELS[0])} ({GROUP_LABELS[0]}) value=0. "
+        "Repeat: none. Resolved: none. Open for 1m."
+    )
+    demo.update_override = {"probe": probe}
+
+    status, out = run(demo, verify.LIVE)
+
+    assert status == 1
+    failed = failure_of(out, "updated")
+    assert f"lists {name_of(GROUP_LABELS[0])} as New" in failed
+    assert f"its {GROUP_LABELS[0]} label was on the Incident already" in failed
+    assert demo.compose_calls == [("stop", "traffic"), ("start", "traffic")]
+
+
+def live_updated(demo, baseline_labels, commented, texts):
+    """`Grafana.updated` on an Incident created with the first Notification's Alerts, a baseline
+    taken with `baseline_labels` on it and `commented` named in comments, and `texts` posted since."""
+    watch = verify_mvp.GroupWatch(demo.world([]), KEY, GROUP, SESSION, Timeouts())
+    watch.world.grafana_alerts = lambda: [
+        {
+            "labels": {"alertname": name_of(label)},
+            "fingerprint": label.removeprefix("fp-"),
+            "generatorURL": ALERTS[label]["generatorURL"],
+        }
+        for label in ALL_LABELS
+    ]
+    content = verify_mvp.Grafana(watch)
+    opened = GroupIncident(
+        key=f"{KEY}-1",
+        status="Open",
+        resolution=None,
+        comments=1,
+        labels=frozenset({GRP, SES, *GROUP_LABELS[:2]}),
+        summary=summary_of(GROUP_LABELS[:2]),
+        description="",
+        comment_texts=(opening_of(GROUP_LABELS[:2]),),
+    )
+    content.created_with = opened.fingerprints
+    baseline = GroupIncident(
+        key=opened.key,
+        status="Open",
+        resolution=None,
+        comments=1,
+        labels=frozenset({GRP, SES, *baseline_labels}),
+        commented_fingerprints=frozenset(commented),
+        comment_texts=opened.comment_texts,
+    )
+    after = GroupIncident(
+        key=opened.key,
+        status="Work in progress",
+        resolution=None,
+        comments=1 + len(texts),
+        labels=frozenset({GRP, SES, *GROUP_LABELS}),
+        comment_texts=(*opened.comment_texts, *texts),
+    )
+    return content, after, baseline
+
+
+def test_live_an_alert_whose_label_landed_a_poll_before_its_comment_is_still_new_in_it(demo):
+    """The Skill adds an Alert's label, then posts the comment that lists it as New: a baseline
+    taken between the two holds the label, and its comment is still to come."""
+    joined = GROUP_LABELS[2]
+    content, after, baseline = live_updated(
+        demo,
+        baseline_labels=GROUP_LABELS,
+        commented=(),
+        texts=[update_of(GROUP_LABELS, GROUP_LABELS[:2])],
+    )
+    assert joined in baseline.fingerprints and joined not in baseline.commented_fingerprints
+
+    held = content.updated(verify_mvp.UPDATED, after, baseline, None)
+
+    assert "list the Alerts as New, Repeat and Resolved" in held
+
+
+def test_live_an_alert_an_earlier_comment_already_named_is_never_new_again(demo):
+    joined = GROUP_LABELS[2]
+    again = update_of(GROUP_LABELS, [joined, *GROUP_LABELS[:2]])
+    content, after, baseline = live_updated(
+        demo,
+        baseline_labels=GROUP_LABELS,
+        commented=(joined,),
+        texts=[again.replace("New: none", f"New: {name_of(joined)} ({joined}) value=0")],
+    )
+
+    with pytest.raises(verify.NotVerified) as refused:
+        content.updated(verify_mvp.UPDATED, after, baseline, None)
+
+    assert f"lists {name_of(joined)} as New" in refused.value.message
+    assert f"its {joined} label was on the Incident already" in refused.value.message
+
+
+def test_live_the_labels_the_incident_was_created_with_are_seen_from_the_start(demo):
+    first = GROUP_LABELS[0]
+    new_again = (
+        f"Update: 3 firing. New: {name_of(first)} ({first}) value=0. Repeat: none. "
+        "Resolved: none. Open for 1m."
+    )
+    content, after, baseline = live_updated(
+        demo, baseline_labels=GROUP_LABELS[:2], commented=(), texts=[new_again]
+    )
+    assert first in content.created_with and first not in baseline.commented_fingerprints
+
+    with pytest.raises(verify.NotVerified) as refused:
+        content.updated(verify_mvp.UPDATED, after, baseline, None)
+
+    assert f"lists {name_of(first)} as New" in refused.value.message
+    assert f"its {first} label was on the Incident already" in refused.value.message
+
+
+def test_live_the_sustained_alert_must_be_new_in_its_own_comment(demo):
+    named = "; ".join(f"{name_of(label)} ({label}) value={value_of(label)}" for label in ALL_LABELS)
+    demo.update_override = {
+        "related": f"Update: 4 firing. New: none. Repeat: {named}. Resolved: none. Open for 2m."
+    }
+
+    status, out = run(demo, verify.LIVE)
+
+    assert status == 1
+    failed = failure_of(out, "related")
+    assert f"does not list {name_of(RELATED_LABEL)} ({RELATED_LABEL}) as New" in failed
+
+
+def test_live_an_update_comment_without_its_lists_fails_updated(demo):
+    demo.update_override = {"repeat": "Update: 3 firing. New: none. Open for 1m."}
+
+    status, out = run(demo, verify.LIVE)
+
+    assert status == 1
+    failed = failure_of(out, "updated")
+    assert "has no `Repeat:`, no `Resolved:`" in failed
+
+
+def test_live_the_closing_comment_may_count_fewer_alerts_than_the_incident_saw(demo):
+    demo.closing_override = closing_of(3, 5)
+
+    status, out = run(demo, verify.LIVE)
+
+    assert status == 0, out
+
+
+def test_live_the_closing_comment_may_not_count_more_alerts_than_the_incident_saw(demo):
+    demo.closing_override = closing_of(7, 5)
+
+    status, out = run(demo, verify.LIVE)
+
+    assert status == 1
+    assert "7 Alerts, not 1 to 4" in failure_of(out, "completed")
+
+
+# --- The content checks, one field at a time ---
+
+
+def alert(name: str, url: str | None = None, value: str | None = None) -> Alert:
+    return Alert("fp-" + name.replace(" ", "-"), name, url, value)
+
+
+@pytest.mark.parametrize(
+    ("summary", "firing", "ok"),
+    [
+        ("checkout-outage: 3 alerts firing", 3, True),
+        ("checkout-outage: 3 alerts firing on rolldice", 3, True),
+        ("Checkout-Outage: 3 Alerts firing", 3, True),
+        ("checkout-outage: 3 firing", 3, True),
+        ("checkout-outage: 1 alert firing", 1, True),
+        ("checkout-outage: 3 alerts firing", None, True),
+        ("checkout-outage: 13 alerts firing", 3, False),
+        ("checkout-outage: 30 alerts firing", 3, False),
+        ("checkout-outage: 3 alerts", 3, False),
+        ("checkout-outage", None, False),
+        ("3 alerts firing", 3, False),
+        ("Test", 3, False),
+    ],
+)
+def test_the_summary_names_the_group_and_the_firing_count(summary, firing, ok):
+    assert (summary_problem(summary, "checkout-outage", firing) is None) is ok
+
+
+ALERT_NAMES = [
+    "rolldice request rate is zero",
+    "it’s “fine” (déjà vu) ✓ — 100% of 50/s",
+    "Überlast: CPU>90% & mem<10%",
+    "disk 'sda' [full]",
+]
+
+
+@pytest.mark.parametrize("name", ALERT_NAMES)
+def test_an_alert_is_named_through_punctuation_quotes_parentheses_and_unicode(name):
+    # The Skill writes a straight quote as ’, so the Run's text may differ from the Alert's.
+    written = name.replace("'", "’")
+    url = "http://localhost:3000/alerting/grafana/uid-1/view?orgId=1&x=a%20b"
+    described = (
+        f"{written} on rolldice:8082: it is down. value=0, since 2026-09-25T14:02:10Z. {url}"
+    )
+
+    assert description_problem(described, [alert(name, url)]) is None
+    assert description_problem(described.replace(url, ""), [alert(name, url)]) == (
+        f"Description {shown(described.replace(url, ''))} is missing: {name} (generator URL)"
+    )
+    assert (
+        opening_problem(f"Opened from 1 firing Alerts in g: {written} value=0.", [alert(name)])
+        is None
+    )
+    assert description_problem(f"{written.upper()}: {url}", [alert(name, url)]) is None
+
+
+LOOK_ALIKE_NAMES = [
+    ('Disk "data" full', "Disk \u201ddata\u201d full"),
+    ("O'Brien's probe", "O\u2019Brien\u2019s probe"),
+    ("path C:\\logs", "path C:\u29f5logs"),
+    ("cost `$5`", "cost \u02cb\uff045\u02cb"),
+    ("tab\tand\nnewline  gap", "tab and newline gap"),
+]
+"""An Alert name and what `incident-payload` writes for it: every character its `plain` swaps."""
+
+
+@pytest.mark.parametrize(("name", "written"), LOOK_ALIKE_NAMES)
+def test_an_alert_is_found_under_the_look_alikes_incident_payload_writes_for_its_name(
+    name, written
+):
+    url = "http://localhost:3000/alerting/grafana/uid-1/view?orgId=1"
+    described = (
+        f"{written} on rolldice:8082: it is down. value=0, since 2026-09-25T14:02:10Z. {url}"
+    )
+
+    assert description_problem(described, [alert(name, url)]) is None
+    assert (
+        opening_problem(f"Opened from 1 firing Alerts in g: {written} value=0.", [alert(name)])
+        is None
+    )
+    assert description_problem("Test", [alert(name, url)]) is not None
+
+
+def test_a_generator_url_is_found_under_the_look_alikes_too():
+    url = "http://localhost:3000/d/x?q=$var&r='a'"
+    written = "http://localhost:3000/d/x?q=\uff04var&r=\u2019a\u2019"
+
+    assert description_problem(f"a: {written}", [alert("a", url)]) is None
+    assert description_problem("a: http://localhost:3000/d/x", [alert("a", url)]) is not None
+
+
+def test_the_look_alike_table_is_the_one_incident_payload_writes():
+    """The two modules cannot import each other, so the table is spelled in both. On a tree that
+    holds both, they must agree on it and on `plain`."""
+    incident_payload = pytest.importorskip("grafana_jsm_sandbox.incident_payload")
+
+    assert verify_content.LOOK_ALIKES == incident_payload.LOOK_ALIKES
+    for raw in [
+        "it's",
+        'say "x"',
+        "a\\b",
+        "`id` $HOME $'x'",
+        "one\ntwo\r\nthree\tfour",
+        "left\u2028right",
+        "bell\x07 null\x00 del\x7f",
+        "\u202eevil",
+        "lone \ud800 surrogate",
+        "  padded  ",
+        "(a)?&=b \u65e5\u672c \U0001f6a8",
+    ]:
+        assert verify_content.plain(raw) == incident_payload.plain(raw)
+
+
+def test_a_name_that_begins_another_is_not_counted_where_the_longer_one_stands():
+    short, long = alert("disk full"), alert("disk full on sda")
+
+    assert description_problem("disk full on sda", [short, long]) == (
+        "Description 'disk full on sda' is missing: disk full (name)"
+    )
+    assert description_problem("disk full on sda; disk full", [short, long]) is None
+
+
+def test_the_sentence_names_a_few_missing_items_and_counts_the_rest():
+    many = [alert(f"alert {number}") for number in range(7)]
+
+    problem = description_problem("Test", many)
+
+    assert problem.startswith("Description 'Test' is missing: alert 0 (name); alert 1 (name);")
+    assert problem.endswith("; and 3 more")
+
+
+def test_a_long_description_is_cut_short_in_the_sentence():
+    problem = description_problem("x" * 500, [alert("a")])
+
+    assert len(problem) < 200 and "…" in problem
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "ok"),
+    [
+        ("Opened from 1 firing Alerts in g: a value=0.", "0", True),
+        ("a (fp-1) value=0", "0", True),
+        ("a value=0.0", "0", True),
+        ("a value=1e-05; b value=2", "0.00001", True),
+        ("a value=-3.5.", "-3.5", True),
+        ("b value=2; a value=0", "0", True),
+        ("a value=0", None, True),
+        ("a value=7", "0", False),
+        ("a value=", None, False),
+        ("a value=n/a", None, False),
+        ("a value=<current>", None, False),
+        ("a; b value=2", None, False),
+        ("a", None, False),
+        ("b value=2", None, False),
+    ],
+)
+def test_the_opening_comment_gives_each_alert_a_number(text, value, ok):
+    assert (opening_problem(text, [alert("a", value=value)]) is None) is ok
+
+
+def test_a_name_that_begins_another_takes_the_value_written_where_it_stands_alone():
+    """`HighLatency p99 value=7; HighLatency value=5` read from the first `HighLatency` gave the
+    short name the long one's value."""
+    short, long = alert("HighLatency", value="5"), alert("HighLatency p99", value="7")
+
+    for text in (
+        "Opened from 2 firing Alerts in g: HighLatency p99 value=7; HighLatency value=5.",
+        "Opened from 2 firing Alerts in g: HighLatency value=5; HighLatency p99 value=7.",
+    ):
+        assert opening_problem(text, [short, long]) is None
+        assert opening_problem(text, [long, short]) is None
+    swapped = "Opened from 2 firing Alerts in g: HighLatency p99 value=5; HighLatency value=7."
+    assert opening_problem(swapped, [short, long]) == (
+        f"opening comment {shown(swapped)} is missing: "
+        "HighLatency (value=5, not 7); HighLatency p99 (value=7, not 5)"
+    )
+
+
+def test_alerts_that_share_a_name_are_matched_as_a_set_of_values_in_any_order():
+    zero, one = alert("Down", value="0"), alert("Down", value="1")
+
+    for text in ("Down value=0; Down value=1", "Down value=1; Down value=0"):
+        assert opening_problem(text, [zero, one]) is None
+        assert opening_problem(text, [one, zero]) is None
+    assert opening_problem("Down value=1; Down value=1", [zero, one]) == (
+        "opening comment 'Down value=1; Down value=1' is missing: Down (value=0, not 1)"
+    )
+    assert opening_problem("Down value=0", [zero, one]) == (
+        "opening comment 'Down value=0' is missing: Down (value=1)"
+    )
+    assert opening_problem("Down value=0; Down", [zero, one]) == (
+        "opening comment 'Down value=0; Down' is missing: Down (value=1)"
+    )
+
+
+def test_an_alert_with_no_known_value_takes_any_that_is_left_and_spends_no_known_ones():
+    live, known = alert("Down"), alert("Down", value="1")
+
+    assert opening_problem("Down value=7; Down value=1", [live, known]) is None
+    assert opening_problem("Down value=1; Down value=7", [live, known]) is None
+    assert opening_problem("Down value=1", [live, known]) == (
+        "opening comment 'Down value=1' is missing: Down (value=<number>)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "ok"),
+    [
+        ("a value=unknown", None, True),
+        ("a value=Unknown.", None, True),
+        ("a value=3; b value=unknown", None, True),
+        ("a value=unknown", "0", False),
+        ("a value=n/a", None, False),
+    ],
+)
+def test_an_alert_with_no_value_is_value_unknown_as_incident_payload_writes_it(text, value, ok):
+    assert (opening_problem(text, [alert("a", value=value)]) is None) is ok
+
+
+def test_incident_payload_s_own_opening_comment_for_an_alert_without_a_value_passes(tmp_path):
+    incident_payload = pytest.importorskip("grafana_jsm_sandbox.incident_payload")
+    notification = fixture(FIRING)
+    del notification["alerts"][0]["values"]
+    lines = printed_by_the_tool(incident_payload, tmp_path, notification, ["create"])
+    [comment] = [line for line in lines if " collaborate comment add " in line]
+    text = shlex.split(comment)[-1]
+    alerts = [
+        alert(
+            a["labels"]["alertname"],
+            value=None if "values" not in a else str(a["values"]["A"]),
+        )
+        for a in notification["alerts"]
+    ]
+
+    assert "value=unknown" in text
+    assert opening_problem(text, alerts) is None
+
+
+def printed_by_the_tool(
+    incident_payload, tmp_path, notification: dict, argv: list[str]
+) -> list[str]:
+    """What `incident-payload <argv>` prints for `notification`, in a Run's directory laid out as
+    the Receiver lays it out: the facts beside the Skill, the Notification in the working one."""
+    runs = tmp_path / "runs"
+    skill = runs / RENDERED_SKILL
+    skill.mkdir(parents=True, exist_ok=True)
+    facts = incident_payload.Facts(
+        project=KEY,
+        session_label=SES,
+        severity_field=None,
+        urgency_field=None,
+        source_field=None,
+        status_done="Completed",
+    )
+    (skill / incident_payload.FACTS_FILE).write_text(facts.as_json())
+    working = runs / "run-1"
+    working.mkdir(exist_ok=True)
+    (working / NOTIFICATION_FILENAME).write_text(json.dumps(notification))
+    return incident_payload.printed(argv, working)
+
+
+def test_the_opening_comment_names_each_alert_not_only_one():
+    problem = opening_problem("a value=1", [alert("a"), alert("b")])
+
+    assert problem == "opening comment 'a value=1' is missing: b (name)"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Update: 2 firing. New: none. Repeat: a value=0; b value=1. Resolved: none. Open for 4m30s.",
+        "update - 2 firing; new: none; repeats: a value=0; b value=1; resolved: none; open for 4m 30s",
+        (
+            "UPDATE: 2 FIRING. NEW: NONE. REPEAT: A VALUE=0; B VALUE=1. RESOLVED: NONE. "
+            "OPEN FOR 4 minutes 30 seconds."
+        ),
+        (
+            "Update: 2 alerts firing.\nNew: none.\nRepeat: a value=0; b value=1.\n"
+            "Resolved: none.\nOpen for 1h2m3s."
+        ),
+        "Update: 2 firing. New: none. Resolved: none. Repeat: b value=1; a value=0. Open for 0s.",
+    ],
+)
+def test_an_update_comment_is_read_whatever_its_case_spacing_order_or_duration(text):
+    a, b = alert("a"), alert("b")
+    expected = classify([a, b], {a.label, b.label})
+
+    assert update_problem(text) is None
+    assert update_problem(text, expected) is None
+
+
+def test_an_update_comment_is_sorted_by_the_skills_rule():
+    a, b, c = alert("a"), alert("b"), alert("c")
+    resolved = Alert(c.label, c.name, resolved=True)
+
+    classified = classify([a, b, resolved], {a.label, c.label}, others=[a, b, c, alert("d")])
+
+    assert classified.firing == 2
+    assert [x.name for x in classified.new] == ["b"]
+    assert [x.name for x in classified.repeat] == ["a"]
+    assert [x.name for x in classified.resolved] == ["c"], "resolved, whichever it would be"
+    assert [x.name for x in classified.others] == ["d"], "the Notification's own are not others"
+
+
+def test_an_alert_of_the_group_that_is_not_in_the_notification_cannot_be_listed():
+    a, b = alert("a"), alert("b")
+    expected = classify([a], {a.label}, others=[b])
+    text = "Update: 1 firing. New: none. Repeat: a value=0; b value=1. Resolved: none. Open for 1s."
+
+    assert update_problem(text, expected) == (
+        f"update comment {shown(text)} sorts the Alerts wrongly: Repeat lists a, b, not a"
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "ok"),
+    [
+        ("Resolved after 4m30s: every Alert in g is resolved (4 Alerts, 3 Runs). Completed", True),
+        ("Resolved after 0s: every Alert in g is resolved (4 alerts, 3 runs).", True),
+        ("resolved after 1h2m3s: ... (4 Alerts, 4 Runs)", True),
+        ("Resolved after 4 minutes: ... ( 4 Alerts , 3 Runs )", True),
+        ("Resolved after about 4m: ... (4 Alerts, 3 Runs)", False),
+        ("Resolved after 4m30s: ... (4 Alerts)", False),
+        ("Resolved after 4m30s: ... (4 Alerts, 7 Runs)", False),
+        ("Resolved after 4m30s: ... (5 Alerts, 3 Runs)", False),
+        ("Resolved: every Alert in g is resolved (4 Alerts, 3 Runs)", False),
+        ("Completed", False),
+    ],
+)
+def test_the_closing_comment_gives_a_duration_and_the_counts_the_incident_supports(text, ok):
+    assert (closing_problem(text, {4}, range(3, 5)) is None) is ok
+
+
+def test_the_counts_a_closing_comment_may_give_read_as_one_number_or_a_range():
+    assert verify_content.says({4}) == "4"
+    assert verify_content.says(range(1, 5)) == "1 to 4"
+    assert verify_content.says({3, 4}) == "3 to 4"
+
+
+@pytest.mark.parametrize(
+    ("body", "text"),
+    [
+        ("plain", "plain"),
+        (None, ""),
+        ({}, ""),
+        (
+            {
+                "type": "doc",
+                "content": [
+                    paragraph("one"),
+                    {
+                        "type": "bulletList",
+                        "content": [
+                            {"type": "listItem", "content": [paragraph("two")]},
+                            {"type": "listItem", "content": [paragraph("three")]},
+                        ],
+                    },
+                ],
+            },
+            "one\ntwo\nthree",
+        ),
+        (
+            {
+                "type": "paragraph",
+                "content": [
+                    {"type": "text", "text": "a"},
+                    {"type": "hardBreak"},
+                    {"type": "text", "text": "b"},
+                ],
+            },
+            "a\nb",
+        ),
+        (
+            {
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "the alert",
+                        "marks": [{"type": "link", "attrs": {"href": "http://x.invalid/a?b=1"}}],
+                    },
+                    {"type": "text", "text": " and http://y.invalid/", "marks": [{"type": "code"}]},
+                    {"type": "inlineCard", "attrs": {"url": "http://z.invalid/c"}},
+                ],
+            },
+            "the alert http://x.invalid/a?b=1 and http://y.invalid/http://z.invalid/c",
+        ),
+        ({"type": "paragraph", "attrs": None, "content": None}, ""),
+    ],
+)
+def test_a_field_s_text_is_read_from_a_string_or_an_adf_document(body, text):
+    assert verify_mvp.comment_text(body) == text
+
+
+def test_a_link_s_address_is_found_whether_the_run_wrote_it_as_text_or_as_a_link():
+    url = "http://localhost:3000/alerting/grafana/uid-1/view?orgId=1"
+    as_link = {
+        "type": "doc",
+        "content": [
+            paragraph("see"),
+            {
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "the rule",
+                        "marks": [{"type": "link", "attrs": {"href": url}}],
+                    }
+                ],
+            },
+        ],
+    }
+
+    assert description_problem(verify_mvp.comment_text(as_link), [alert("the rule", url)]) is None
+
+
+@pytest.mark.parametrize(
+    ("url", "path"),
+    [
+        (
+            "http://localhost:3000/alerting/grafana/uid-1/view?orgId=1",
+            "/alerting/grafana/uid-1/view?orgId=1",
+        ),
+        ("http://grafana:3000/alerting/grafana/uid-1/view", "/alerting/grafana/uid-1/view"),
+        ("http://grafana:3000/", None),
+        ("http://grafana:3000", None),
+        ("", None),
+        (None, None),
+        (7, None),
+    ],
+)
+def test_a_generator_url_is_known_by_what_follows_the_host(url, path):
+    assert verify_content.path_of(url) == path
+
+
+def test_a_live_alert_is_held_to_the_address_after_the_host():
+    live_alert = alert("a", "/alerting/grafana/uid-1/view?orgId=1")
+
+    described = "a: http://localhost:3000/alerting/grafana/uid-1/view?orgId=1"
+
+    assert description_problem(described, [live_alert]) is None
+    assert description_problem("a: http://localhost:3000/", [live_alert]) == (
+        "Description 'a: http://localhost:3000/' is missing: a (generator URL)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "why"),
+    [
+        (None, "something other than an Alert list"),
+        ({}, "something other than an Alert list"),
+        ([], None),
+        ([1, "x", None, {"labels": "x"}, {"labels": {"alertname": "a"}}], None),
+        ([{"labels": {"alertname": "", "x": "y"}, "fingerprint": "1"}], None),
+        ([{"labels": {"alertname": "a"}, "fingerprint": 7}], None),
+    ],
+)
+def test_alertmanager_answers_that_name_no_alert_give_no_alerts_and_no_traceback(demo, answer, why):
+    watch = verify_mvp.GroupWatch(demo.world([]), KEY, GROUP, SESSION, Timeouts())
+    watch.world.grafana_alerts = lambda: answer
+
+    known, reason = verify_mvp.Grafana(watch).known()
+
+    assert known == {}
+    assert (why in reason) if why else reason is None
+
+
+def test_alertmanager_s_alerts_are_known_by_label_name_and_the_address_after_the_host(demo):
+    watch = verify_mvp.GroupWatch(demo.world([]), KEY, GROUP, SESSION, Timeouts())
+    watch.world.grafana_alerts = lambda: [
+        {
+            "labels": {"alertname": "a rule", "incident_group": GROUP},
+            "fingerprint": "abc123",
+            "generatorURL": "http://grafana:3000/alerting/grafana/uid-1/view?orgId=1",
+        },
+        {"labels": {"alertname": "no address"}, "fingerprint": "def456"},
+    ]
+
+    known, reason = verify_mvp.Grafana(watch).known()
+
+    assert reason is None
+    assert known == {
+        "fp-abc123": Alert("fp-abc123", "a rule", "/alerting/grafana/uid-1/view?orgId=1"),
+        "fp-def456": Alert("fp-def456", "no address"),
+    }
+
+
+def test_a_new_alert_whose_name_begins_with_a_seen_ones_is_not_taken_for_it():
+    seen, new = alert("disk full"), alert("disk full on sda")
+    text = (
+        "Update: 2 firing. New: disk full on sda (fp-disk-full-on-sda) value=1. "
+        "Repeat: disk full value=0. Resolved: none. Open for 1s."
+    )
+
+    assert verify_content.sorted_problem([text], [seen], None, [new]) is None
+    assert verify_content.sorted_problem([text], [seen], None) is not None, (
+        "without the longer name, the shorter one is found where only it can be"
+    )
