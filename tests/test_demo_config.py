@@ -23,6 +23,7 @@ from grafana_jsm_sandbox.demo_config import (
     DemoProject,
     IncompleteDemoProject,
     InvalidSessionId,
+    InvestigationSettings,
     compose_environment,
     jira_as_environment,
     read_env_file,
@@ -395,3 +396,161 @@ def test_a_session_id_whose_label_jira_as_reads_as_an_issue_key_is_refused(sessi
     refuses a search naming another project's, so `ses-local-1` would fail every Match search."""
     with pytest.raises(InvalidSessionId, match=f"reads {read_as} as an issue key"):
         session_id_from_environment({"DEMO_SESSION_ID": session_id})
+
+
+# --- Opt-in Grafana investigation, read from the Receiver's environment ---
+
+
+@pytest.mark.parametrize("flag", [None, "", "  ", "false", "FALSE", "0"])
+def test_disabled_investigation_ignores_grafana_values_and_passes_no_environment(flag):
+    environment = {
+        "DEMO_GRAFANA_URL": "not a URL",
+        "DEMO_GRAFANA_PRESENTER_URL": "",
+        "DEMO_GRAFANA_VIEWER_TOKEN": "bad\ntoken",
+        "GRAFANA_HOST_PORT": "not a port",
+    }
+    if flag is not None:
+        environment["DEMO_INVESTIGATION_ENABLED"] = flag
+
+    settings = InvestigationSettings.from_environment(environment)
+
+    assert settings == InvestigationSettings()
+    assert settings.run_environment() == {}
+
+
+@pytest.mark.parametrize("flag", ["true", "TRUE", "1", " True "])
+def test_enabled_investigation_normalizes_exactly_four_run_variables(flag):
+    settings = InvestigationSettings.from_environment(
+        {
+            "DEMO_INVESTIGATION_ENABLED": flag,
+            "DEMO_GRAFANA_URL": " http://lgtm:3000/grafana/ ",
+            "DEMO_GRAFANA_PRESENTER_URL": " https://presenter.invalid:3443/grafana/ ",
+            "DEMO_GRAFANA_VIEWER_TOKEN": " viewer-token-private ",
+        }
+    )
+
+    assert settings.run_environment() == {
+        "DEMO_INVESTIGATION_ENABLED": "true",
+        "DEMO_GRAFANA_URL": "http://lgtm:3000/grafana",
+        "DEMO_GRAFANA_PRESENTER_URL": "https://presenter.invalid:3443/grafana",
+        "DEMO_GRAFANA_VIEWER_TOKEN": "viewer-token-private",
+    }
+    assert "viewer-token-private" not in repr(settings)
+    assert "viewer_token" not in repr(settings)
+
+
+def test_enabled_investigation_defaults_absent_urls_and_uses_the_published_port():
+    settings = InvestigationSettings.from_environment(
+        {
+            "DEMO_INVESTIGATION_ENABLED": "true",
+            "DEMO_GRAFANA_VIEWER_TOKEN": "viewer-token-private",
+            "GRAFANA_HOST_PORT": "3300",
+        }
+    )
+
+    assert settings.url == "http://localhost:3000"
+    assert settings.presenter_url == "http://localhost:3300"
+    assert "GRAFANA_HOST_PORT" not in settings.run_environment()
+    assert (
+        InvestigationSettings.from_environment(
+            {"DEMO_INVESTIGATION_ENABLED": "true", "DEMO_GRAFANA_VIEWER_TOKEN": "token"}
+        ).presenter_url
+        == "http://localhost:3000"
+    )
+
+
+@pytest.mark.parametrize("flag", ["yes", "2", "no", "viewer-token-private"])
+def test_a_malformed_investigation_flag_is_refused_even_without_grafana_settings(flag):
+    with pytest.raises(ConfigurationError) as refusal:
+        InvestigationSettings.from_environment({"DEMO_INVESTIGATION_ENABLED": flag})
+
+    assert "DEMO_INVESTIGATION_ENABLED" in str(refusal.value)
+    assert flag not in str(refusal.value)
+
+
+@pytest.mark.parametrize("variable", ["DEMO_GRAFANA_URL", "DEMO_GRAFANA_PRESENTER_URL"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        " ",
+        "lgtm:3000",
+        "ftp://lgtm",
+        "http://",
+        "http://lgtm:0",
+        "http://lgtm:65536",
+        "http://lgtm:bad",
+        "http://[broken",
+        "http://user:viewer-token-private@lgtm",
+        "http://user@lgtm",
+        "http://lgtm?token=viewer-token-private",
+        "http://lgtm#viewer-token-private",
+        "http://lgtm?",
+        "http://lgtm#",
+        "http://lg tm",
+        "http://lgtm/\npath",
+    ],
+)
+def test_enabled_investigation_refuses_bad_urls_without_printing_values(variable, value):
+    with pytest.raises(ConfigurationError) as refusal:
+        InvestigationSettings.from_environment(
+            {
+                "DEMO_INVESTIGATION_ENABLED": "true",
+                "DEMO_GRAFANA_VIEWER_TOKEN": "viewer-token-private",
+                variable: value,
+            }
+        )
+
+    assert variable in str(refusal.value)
+    assert "viewer-token-private" not in str(refusal.value)
+    if value.strip():
+        assert value not in str(refusal.value)
+
+
+@pytest.mark.parametrize("value", [None, "", " ", "bad\ntoken", "bad\rtoken", "token\n"])
+def test_enabled_investigation_requires_a_nonblank_token_without_cr_or_lf(value):
+    environment = {"DEMO_INVESTIGATION_ENABLED": "true"}
+    if value is not None:
+        environment["DEMO_GRAFANA_VIEWER_TOKEN"] = value
+    with pytest.raises(ConfigurationError) as refusal:
+        InvestigationSettings.from_environment(environment)
+
+    assert "DEMO_GRAFANA_VIEWER_TOKEN" in str(refusal.value)
+    assert "bad" not in str(refusal.value)
+
+
+@pytest.mark.parametrize("port", ["", "0", "65536", "-1", "three", "3.5"])
+def test_the_default_presenter_url_requires_a_valid_published_port(port):
+    environment = {
+        "DEMO_INVESTIGATION_ENABLED": "true",
+        "DEMO_GRAFANA_VIEWER_TOKEN": "viewer-token-private",
+        "GRAFANA_HOST_PORT": port,
+    }
+    with pytest.raises(ConfigurationError, match="GRAFANA_HOST_PORT"):
+        InvestigationSettings.from_environment(environment)
+
+    settings = InvestigationSettings.from_environment(
+        {**environment, "DEMO_GRAFANA_PRESENTER_URL": "http://presenter.invalid"}
+    )
+    assert settings.presenter_url == "http://presenter.invalid"
+
+
+@pytest.mark.parametrize("port", ["1", "65535"])
+def test_the_published_port_accepts_both_valid_boundaries(port):
+    settings = InvestigationSettings.from_environment(
+        {
+            "DEMO_INVESTIGATION_ENABLED": "true",
+            "DEMO_GRAFANA_VIEWER_TOKEN": "token",
+            "GRAFANA_HOST_PORT": port,
+        }
+    )
+    assert settings.presenter_url == f"http://localhost:{port}"
+
+
+def test_investigation_reads_the_process_environment_when_no_mapping_is_given(monkeypatch):
+    for variable in ("DEMO_GRAFANA_URL", "DEMO_GRAFANA_PRESENTER_URL", "GRAFANA_HOST_PORT"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("DEMO_INVESTIGATION_ENABLED", "true")
+    monkeypatch.setenv("DEMO_GRAFANA_VIEWER_TOKEN", "viewer-token-private")
+
+    assert InvestigationSettings.from_environment().enabled
