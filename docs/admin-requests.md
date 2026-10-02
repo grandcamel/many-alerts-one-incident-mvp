@@ -80,23 +80,37 @@ fills, is a FAIL on `create screen`.
 For a Jira administrator.
 
 ```text
-On the Jira Service Management project <KEY>, could you make sure that the Incident workflow's
-Resolve transition (to Completed) shows the Resolution field on its screen, and that the site
-has a resolution named Done?
+On the Jira Service Management project <KEY>, could you put the Resolution field on the screen
+of the Incident workflow's Resolve transition (the one to Completed), and keep the resolution
+named Done on the site and available to that transition?
+
+A Run completes each Incident by sending resolution Done with the transition. Today the screen
+refuses it. If the workflow also sets Done in a post function, please leave that as it is.
 
 An Incident completed without a resolution stays in the Incidents queue, because the queue
 lists unresolved Incidents.
 ```
 
 Why: a Run and the reset both complete an Incident with resolution Done. When the Resolve screen
-has no Resolution field, jira-as 2.0.0 quietly retries the transition without one, and the
-Incident reaches Completed with no resolution and stays in the queue.
+has no Resolution field, Jira answers the transition with HTTP 400, and jira-as 2.0.0 quietly
+retries it without a resolution. The retry succeeds (204) and the Incident reaches Completed. It
+ends with resolution Done only if a workflow post function happens to set one, and otherwise
+with none, so it stays in the queue.
+
+What the presenter sees until it is done: on every close, the log shows a WARNING
+`forwarded POST … upstream said 400` on the transition, then the retry, `upstream said 204`.
+The warning looks like a failure during a demo, and it is the screen refusing, not the Run. The
+Incident still completes. What matters is the Incident's last state, which the Run reads after
+the transition: with a post function that sets Done the Run finishes normally, and without one it
+ends `failed:` and the log shows `[FAILED] run reported failed: …`, naming the missing
+resolution. Expect the 400 and say what it is, or ask for this before the day.
 
 How the repo notices: `configure` and `doctor`'s `resolution` check fails when the site has no
-Done. Whether the screen takes it shows only when an Incident is completed: `verify`'s
-`completed` stage fails, naming this request, when the Incident reaches Completed without one,
-and `reset` leaves such an Incident on Completed, saying to ask for this, and takes it out on
-the next run once the screen is fixed.
+Done. Whether the screen takes it shows only when an Incident is completed: the Run's own check
+ends it `failed:` when the Incident is Completed with no resolution, `verify`'s `completed`
+stage fails, naming this request, for the same Incident, and `reset` leaves such an Incident on
+Completed, saying to ask for this, and takes it out on the next run once the screen is fixed. Once
+the screen has the field, the transition succeeds on its first POST and the 400 is gone.
 
 ## Jira admin: workflow statuses
 
