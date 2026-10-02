@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
+import unicodedata
 
 import pytest
 
 from grafana_jsm_sandbox.incident_payload import printed
 from grafana_jsm_sandbox.investigation_contract import EVIDENCE_FILENAME
+from grafana_jsm_sandbox.loki_evidence import summarize_logs
 from tests.test_incident_payload import FIRING, canned, evidence_record, run_directory
 
 START = "2026-10-01T14:00:00.000Z"
@@ -39,6 +42,12 @@ def logs_record():
     }
 
 
+def delivered_adf(command, tmp_path):
+    words = shlex.split(command)
+    working = tmp_path / "runs" / "20261001T140210-abc123"
+    return json.loads((working / words[words.index("--body-file") + 1]).read_text(encoding="utf-8"))
+
+
 def investigation(tmp_path, records):
     working = run_directory(tmp_path, canned(FIRING))
     (working / EVIDENCE_FILENAME).write_text(
@@ -47,8 +56,7 @@ def investigation(tmp_path, records):
         "investigate", "--key", "SANDBOX-7", "--observation", "returned log evidence",
         "--interpretation", "uncertain", "--unknown", "check next",
     ], working)
-    words = shlex.split(command)
-    comment = json.loads(words[words.index("-b") + 1])
+    comment = delivered_adf(command, tmp_path)
     nodes = comment["content"][0]["content"]
     return command, nodes, "".join(node.get("text", "") for node in nodes)
 
@@ -61,6 +69,7 @@ def test_investigation_renders_literal_log_excerpt_with_exact_timestamp_and_link
     assert "1 returned log entries" in text
     assert STAMP in text and '"service_name":"rolldice"' in text
     assert LINE in [node.get("text") for node in nodes]
+    assert "[control characters shown as U+XXXX]" not in text
     assert '"trace_id":"trace\'one"' in text
     assert [mark["attrs"]["href"] for node in nodes for mark in node.get("marks", [])
             if mark["type"] == "link"] == [record["presenter_link"]]
@@ -193,3 +202,167 @@ def test_empty_log_lines_keep_valid_adf_and_an_explicit_empty_line_display(tmp_p
 
     assert all(node["text"] for node in nodes if node["type"] == "text")
     assert STAMP in text and "[empty log line]" in text
+
+
+def test_colored_werkzeug_excerpt_survives_observed_command_normalization(tmp_path):
+    """Replay the observed ESC expansion, not Claude's unavailable validator.
+
+    The captured wire command matched helper stdout. Between wire and parsed
+    tool input its literal \\u001b sequences became ESC; validation rejected
+    hidden command controls before Bash ran. This is the captured fragment.
+    """
+    line = ("\x1b[35m\x1b[1mGET /rolldice?player=demo&sides=six HTTP/1.1"
+            "\x1b[0m")
+    record = logs_record()
+    record["response"]["data"]["result"][0]["values"][0][1] = line
+    record["log_summary"] = summarize_logs(record["response"], 100)
+    original_bytes = (json.dumps(record) + "\n").encode()
+
+    command, nodes, text = investigation(tmp_path, [record])
+
+    assert "\x1b" not in command
+    normalized_command = command.replace("\\u001b", "\x1b")
+    assert "\x1b" not in normalized_command, "observed normalization reintroduced hidden ESC"
+    assert ("[U+001B][35m[U+001B][1mGET /rolldice?player=demo&sides=six HTTP/1.1"
+            "[U+001B][0m") in [node.get("text") for node in nodes]
+    assert "[control characters shown as U+XXXX]" in text
+    saved = tmp_path / "runs" / "20261001T140210-abc123" / EVIDENCE_FILENAME
+    assert saved.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("location", [
+    "line", "query", "label_key", "label_value", "metadata_key", "metadata_value",
+])
+def test_loki_display_controls_are_printable_without_rewriting_raw_evidence(tmp_path, location):
+    record = logs_record()
+    controls = "\x00\x07\x1b\x7f\x85\t\r"
+    value = LINE + controls
+    stream = record["response"]["data"]["result"][0]
+    if location == "line":
+        stream["values"][0][1] = value
+    elif location == "query":
+        record["query"] += value
+        record["parameters"][0][1] = record["query"]
+    elif location.startswith("label_"):
+        stream["stream"] = ({value: "rolldice"} if location == "label_key"
+                            else {"service_name": value})
+    else:
+        stream["values"][0][2] = ({value: "trace"} if location == "metadata_key"
+                                 else {"trace_id": value})
+    record["log_summary"] = summarize_logs(record["response"], 100)
+    original_bytes = (json.dumps(record) + "\n").encode()
+
+    command, _, text = investigation(tmp_path, [record])
+
+    # Replay only the Unicode-control expansion observed in captured tool input.
+    normalized = command
+    for control in controls:
+        normalized = normalized.replace(f"\\u{ord(control):04x}", control)
+    assert not any(unicodedata.category(character) == "Cc" for character in normalized)
+    assert not any(unicodedata.category(character) == "Cc" and character != "\n"
+                   for character in text)
+    assert "[U+0000][U+0007][U+001B][U+007F][U+0085][U+0009][U+000D]" in text
+    assert "[control characters shown as U+XXXX]" in text
+    assert "café 🎲" in text
+    saved = tmp_path / "runs" / "20261001T140210-abc123" / EVIDENCE_FILENAME
+    assert saved.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("location", ["labels", "metadata"])
+def test_display_control_notation_preserves_entries_with_colliding_key_spellings(tmp_path, location):
+    record = logs_record()
+    fields = {"\x1b": "actual control", "[U+001B]": "literal notation"}
+    stream = record["response"]["data"]["result"][0]
+    if location == "labels":
+        stream["stream"] = fields
+    else:
+        stream["values"][0][2] = fields
+    record["log_summary"] = summarize_logs(record["response"], 100)
+    original_bytes = (json.dumps(record) + "\n").encode()
+
+    _, _, text = investigation(tmp_path, [record])
+
+    assert f'{location}={{"[U+001B]":"actual control","[U+001B]":"literal notation"}}' in text
+    assert "[control characters shown as U+XXXX]" in text
+    saved = tmp_path / "runs" / "20261001T140210-abc123" / EVIDENCE_FILENAME
+    assert saved.read_bytes() == original_bytes
+
+
+def test_observed_unicode_normalization_preserves_decoded_adf_punctuation(tmp_path):
+    """Captured normalization expands Unicode escapes, leaving LF escapes intact.
+
+    Its apostrophe expansion made shell parsing silently remove log punctuation.
+    Replay the observed character classes rather than claiming the real validator.
+    """
+    record = logs_record()
+    line = "invalid literal for int() with base 10: 'six'\n" + LINE.replace("worker's", "worker")
+    record["response"]["data"]["result"][0]["values"][0][1] = line
+    record["response"]["data"]["result"][0]["values"][0][2] = {
+        "exception_message": "invalid literal for int() with base 10: 'six'"}
+    record["log_summary"] = summarize_logs(record["response"], 100)
+    original_bytes = (json.dumps(record) + "\n").encode()
+
+    command, nodes, _ = investigation(tmp_path, [record])
+    normalized = re.sub(r"\\u(001b|0027|0024|0060|2019|201d)",
+                        lambda match: chr(int(match[1], 16)), command, flags=re.IGNORECASE)
+    wire_adf = delivered_adf(command, tmp_path)
+    parsed_adf = delivered_adf(normalized, tmp_path)
+
+    assert parsed_adf == wire_adf, "observed normalization changed decoded ADF punctuation"
+    assert line in [node.get("text") for node in nodes]
+    assert "\n" not in command and "\x1b" not in normalized
+    saved = tmp_path / "runs" / "20261001T140210-abc123" / EVIDENCE_FILENAME
+    assert saved.read_bytes() == original_bytes
+
+
+def test_unicode_separator_display_keeps_the_public_command_one_line(tmp_path):
+    record = logs_record()
+    record["response"]["data"]["result"][0]["values"][0][1] = "before\u2028after\u2029end"
+    record["log_summary"] = summarize_logs(record["response"], 100)
+    original_bytes = (json.dumps(record) + "\n").encode()
+
+    command, nodes, text = investigation(tmp_path, [record])
+
+    assert len(command.splitlines()) == 1
+    assert "before[U+2028]after[U+2029]end" in [node.get("text") for node in nodes]
+    assert "[control characters shown as U+XXXX]" in text
+    saved = tmp_path / "runs" / "20261001T140210-abc123" / EVIDENCE_FILENAME
+    assert saved.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("location", [
+    "line", "query", "label_key", "label_value", "metadata_key", "metadata_value",
+])
+def test_literal_unicode_escape_notation_is_disclosed_and_survives_normalization(tmp_path, location):
+    """Conservative replay boundary; live decoding of double escapes is unconfirmed."""
+    literal = r"\u001b \u0027 \u2028 \u005c" + "\nordinary\\path 👩‍💻"
+    displayed = literal.replace("\\u", "[U+005C]u")
+    record = logs_record()
+    stream = record["response"]["data"]["result"][0]
+    if location == "line":
+        stream["values"][0][1] = literal
+    elif location == "query":
+        record["query"] = literal
+        record["parameters"][0][1] = literal
+    elif location.startswith("label_"):
+        stream["stream"] = ({literal: "rolldice"} if location == "label_key"
+                            else {"service_name": literal})
+    else:
+        stream["values"][0][2] = ({literal: "trace"} if location == "metadata_key"
+                                 else {"trace_id": literal})
+    record["log_summary"] = summarize_logs(record["response"], 100)
+    original_bytes = (json.dumps(record) + "\n").encode()
+
+    command, _, text = investigation(tmp_path, [record])
+    normalized = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match[1], 16)), command)
+
+    assert normalized == command, "literal Unicode notation still expands in the replay"
+    assert delivered_adf(command, tmp_path) == delivered_adf(normalized, tmp_path)
+    assert len(command.splitlines()) == 1
+    expected = (displayed if location in ("line", "query")
+                else json.dumps(displayed, ensure_ascii=False)[1:-1])
+    assert expected in text
+    assert "[Unicode escape notation shown with U+005C]" in text
+    assert "[control characters shown as U+XXXX]" not in text
+    saved = tmp_path / "runs" / "20261001T140210-abc123" / EVIDENCE_FILENAME
+    assert saved.read_bytes() == original_bytes

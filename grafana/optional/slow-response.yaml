@@ -1,0 +1,54 @@
+# Opt-in observation of mean HTTP response duration, in milliseconds.
+# It reports latency and does not identify its cause.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: rolldice-latency
+    folder: demo-latency
+    interval: 10s
+    rules:
+      - uid: rolldice-response-slow
+        title: rolldice responses are slow
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 60
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: sum by (instance) (rate(http_server_duration_milliseconds_sum{service_name="rolldice"}[20s])) / sum by (instance) (rate(http_server_duration_milliseconds_count{service_name="rolldice"}[20s]))
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 250
+        for: 30s
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+          service: rolldice
+          incident_group: slow-response
+        annotations:
+          summary: rolldice responses are slow
+          description: The mean rolldice HTTP response duration over twenty seconds has exceeded 250 milliseconds for thirty seconds.
+        isPaused: false

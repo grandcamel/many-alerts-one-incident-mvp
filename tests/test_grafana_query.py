@@ -73,7 +73,8 @@ def evidence_comment(tmp_path):
         tmp_path / "grafana-evidence.jsonl",
     )
     arguments = shlex.split(command)
-    nodes = json.loads(arguments[arguments.index("-b") + 1])["content"][0]["content"]
+    body_file = tmp_path / arguments[arguments.index("--body-file") + 1]
+    nodes = json.loads(body_file.read_text(encoding="utf-8"))["content"][0]["content"]
     return "".join(node["text"] for node in nodes), nodes
 
 

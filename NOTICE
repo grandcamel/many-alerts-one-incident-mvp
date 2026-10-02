@@ -8,7 +8,7 @@ directory examples/python/, Copyright Grafana Labs, and is licensed under the
 Apache License, Version 2.0 (a copy is in LICENSES/Apache-2.0.txt):
 
     docker/rolldice/app.py            modified; its header says how
-    docker/rolldice/requirements.txt  as upstream, with the attribution header added
+    docker/rolldice/requirements.txt  modified; its header says how
     docker/rolldice/Dockerfile        modified; its header says how
 
 The agent conventions under docs/agents/ (domain.md, issue-tracker.md and

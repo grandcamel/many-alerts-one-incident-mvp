@@ -17,7 +17,10 @@ incident-payload = "grafana_jsm_sandbox.incident_payload:main"
 grafana-query = "grafana_jsm_sandbox.grafana_query:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pyyaml>=6.0", "Flask==3.1.2"]
+dev = [
+    "pytest>=7.0", "pyyaml>=6.0", "Flask==3.1.2",
+    "opentelemetry-sdk==1.39.0", "opentelemetry-instrumentation-flask==0.60b0",
+]
 
 [tool.setuptools]
 # Named, because the repo root holds other directories setuptools would take for packages

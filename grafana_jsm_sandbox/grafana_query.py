@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -27,6 +27,11 @@ from grafana_jsm_sandbox.investigation_contract import (
     EVIDENCE_SCHEMA_VERSION,
 )
 from grafana_jsm_sandbox.loki_evidence import summarize_logs
+from grafana_jsm_sandbox.tempo_evidence import (
+    normalize_trace_id,
+    summarize_search,
+    summarize_trace,
+)
 
 TIMEOUT_SECONDS = 10
 UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -58,10 +63,14 @@ class _Parser(argparse.ArgumentParser):
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="grafana-query", allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("instant", "range", "get", "logs"):
+    for name in ("instant", "range", "get", "logs", "traces", "trace"):
         command = commands.add_parser(name, allow_abbrev=False)
-        command.add_argument("--datasource", default="loki" if name == "logs" else "prometheus")
-        if name == "get":
+        command.add_argument("--datasource", default=(
+            "tempo" if name in {"traces", "trace"} else "loki" if name == "logs" else "prometheus"
+        ))
+        if name == "trace":
+            command.add_argument("--id", required=True)
+        elif name == "get":
             command.add_argument("--path", required=True)
             command.add_argument("--param", action="append", default=[])
         else:
@@ -71,9 +80,10 @@ def _parser() -> argparse.ArgumentParser:
             else:
                 command.add_argument("--start", default="now-10m")
                 command.add_argument("--end", default="now")
-                if name == "logs":
-                    command.add_argument("--limit", default="100")
-                    command.add_argument("--direction", default="backward")
+                if name in {"logs", "traces"}:
+                    command.add_argument("--limit", default="100" if name == "logs" else "20")
+                    if name == "logs":
+                        command.add_argument("--direction", default="backward")
                 else:
                     command.add_argument("--step", default="10s")
     return parser
@@ -186,7 +196,28 @@ def _invocation(args, now: Decimal):
     if not args.datasource:
         raise QueryError("--datasource must be nonempty")
     start = end = step = None
-    if args.command == "instant":
+    if args.command == "trace":
+        try:
+            args.query = normalize_trace_id(args.id)
+        except ValueError:
+            raise QueryError("--id must be a nonzero 1 to 32 character hex trace ID") from None
+        path = "/api/v2/traces/" + args.query
+        parameters = []
+    elif args.command == "traces":
+        start = _time(args.start, "--start", now)
+        end = _time(args.end, "--end", now)
+        if not (0 <= start < 2 ** 32 and 0 <= end < 2 ** 32):
+            raise QueryError("--start and --end must be nonnegative uint32 seconds")
+        if start > end:
+            raise QueryError("--start must be <= --end")
+        start = start.to_integral_value(rounding=ROUND_FLOOR)
+        end = end.to_integral_value(rounding=ROUND_FLOOR)
+        if not re.fullmatch(r"[0-9]+", args.limit) or int(args.limit) <= 0:
+            raise QueryError("--limit must be a positive integer")
+        path = "/api/search"
+        parameters = [("q", args.query), ("start", str(start)), ("end", str(end)),
+                      ("limit", str(int(args.limit)))]
+    elif args.command == "instant":
         start = end = _time(args.time, "--time", now)
         path = "/api/v1/query"
         parameters = [("query", args.query), ("time", _decimal(start))]
@@ -432,6 +463,17 @@ def _presenter(base, args, proxy, parameters, start, end):
     base = quote(base, safe=":/%[]")
     if args.command == "get":
         return base + quote(proxy, safe="/%") + ("?" + urlencode(parameters) if parameters else "")
+    if args.command in {"traces", "trace"}:
+        query = {"refId": "A", "datasource": {"uid": args.datasource, "type": "tempo"},
+                 "queryType": "traceql" if args.command == "traces" else "traceId",
+                 "query": args.query}
+        if args.command == "traces":
+            query.update(filters=[], limit=int(args.limit))
+        bounds = {"from": "now-10m", "to": "now"} if start is None else {
+            "from": str(int(start * 1000)), "to": str(int(end * 1000)),
+        }
+        panes = {"A": {"datasource": args.datasource, "queries": [query], "range": bounds}}
+        return base + "/explore?schemaVersion=1&panes=" + quote(_json(panes), safe="")
     panes = {"A": {"datasource": args.datasource, "queries": [{
         "refId": "A", "expr": args.query, "instant": args.command == "instant",
         "range": args.command in {"range", "logs"},
@@ -457,6 +499,14 @@ def _display(record, outcome: str, writable: bool) -> list[str]:
         )
     if record["status"] == "unavailable":
         detail = "unavailable"
+    elif record["command"] == "traces":
+        traces = record["trace_summary"]
+        detail = "possibly incomplete (limit reached)" if traces["limit_reached"] else "returned traces"
+        if not traces["trace_count"]:
+            detail = "no data"
+    elif record["command"] == "trace":
+        trace = record["trace_summary"]
+        detail = f'backend {trace["backend_status"]}; {trace["missing_parent_count"]} missing parents'
     elif record["command"] == "logs":
         logs = record["log_summary"]
         detail = "possibly incomplete (limit reached)" if logs["limit_reached"] else "returned data"
@@ -481,6 +531,12 @@ def _display(record, outcome: str, writable: bool) -> list[str]:
         if summary["unmodelled_count"]:
             detail += f'; unmodelled samples={summary["unmodelled_count"]}'
     counts = (
+        f'trace: {record["trace_summary"]["span_count"]} observed spans'
+        if record["command"] == "trace" and record["trace_summary"] is not None else
+        "trace: unavailable" if record["command"] == "trace" else
+        f'traces: {record["trace_summary"]["trace_count"]} returned traces'
+        if record["command"] == "traces" and record["trace_summary"] is not None else
+        "traces: unavailable" if record["command"] == "traces" else
         f'logs: {record["log_summary"]["stream_count"]} streams, '
         f'{record["log_summary"]["entry_count"]} returned entries'
         if record["command"] == "logs" and record["log_summary"] is not None else
@@ -490,7 +546,9 @@ def _display(record, outcome: str, writable: bool) -> list[str]:
     lines = [
         "grafana-query: " + outcome,
         "query: " + query,
-        f'datasource: {record["datasource"]} | window: {bounds} | step: {step}',
+        (f'datasource: {record["datasource"]} | lookup by ID; no API time filter'
+         if record["command"] == "trace" else
+         f'datasource: {record["datasource"]} | window: {bounds} | step: {step}'),
         counts + " | " + detail,
         (f'evidence: {EVIDENCE_FILENAME if writable else "unavailable"} | '
          f'presenter: {record["presenter_link"] or "none"}'),
@@ -524,6 +582,8 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.command == "logs":
         record["log_summary"] = None
+    if args.command in {"traces", "trace"}:
+        record["trace_summary"] = None
 
     def unavailable(kind, message, status=None):
         record["error"] = {"kind": kind, "message": message, "http_status": status}
@@ -556,6 +616,23 @@ def main(argv: list[str] | None = None) -> int:
                         record["log_summary"] = summarize_logs(response, int(args.limit))
                         record["sample_summary"]["result_type"] = "streams"
                         outcome = "ok" if record["log_summary"]["entry_count"] else "no data"
+                    elif args.command == "traces":
+                        record["trace_summary"] = summarize_search(response, int(args.limit))
+                        record["sample_summary"]["result_type"] = "traces"
+                        outcome = "ok" if record["trace_summary"]["trace_count"] else "no data"
+                    elif args.command == "trace":
+                        record["trace_summary"] = summarize_trace(response, args.query)
+                        record["sample_summary"]["result_type"] = "trace"
+                        trace = record["trace_summary"]
+                        outcome = "ok" if trace["span_count"] else "no data"
+                        if trace["start_time_ns"] is not None:
+                            # Navigation covers observed spans; the API lookup is unbounded.
+                            lower_ms = int(trace["start_time_ns"]) // 1_000_000
+                            upper_ms = (int(trace["end_time_ns"]) + 999_999) // 1_000_000
+                            record["presenter_link"] = _presenter(
+                                presenter, args, proxy, parameters,
+                                Decimal(lower_ms) / 1000, Decimal(upper_ms) / 1000,
+                            )
                     elif args.command == "get":
                         record["sample_summary"], outcome = _get_summary(response)
                     else:

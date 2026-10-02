@@ -42,3 +42,28 @@ which the Run posts through its existing Jira path. It opens no socket and write
 An investigation query, evidence-builder or post failure preserves a successful lifecycle's
 `ok: ` Finish. Disabled Skill rendering adds no investigation tool, query instructions or
 token facts; its close-count correction still applies when a prior marked comment remains.
+
+**2026-10-02, bounded investigation body files.** Investigation delivery amends the
+payload tool's earlier no-file-write contract. Every `incident-payload investigate`
+invocation serializes its ADF once as UTF-8 and publishes a body file under the
+current Run directory, with a generated content-derived basename and no caller-supplied
+output path. Publication is atomic with mode `0600`; an existing destination is reused
+only when it is a regular non-symlink file containing identical bytes. Unsafe or
+conflicting destinations and file failures are refused, temporary cleanup is attempted,
+and no posting command is printed on write or cleanup failure. The local artifact cap is 256 KiB,
+which bounds this writer and is not a Jira body-size or acceptance guarantee.
+
+The helper prints the short command `jira-as collaborate comment add KEY --body-file
+BASENAME --format adf`; jira-as reads the UTF-8 body and posts through the same project
+allowlist and Forwarder. No permission rules, credential access, sockets, subprocesses
+or Forwarder authority are added. All other payload steps retain their previous
+outputs and filesystem behavior. Raw Grafana evidence and disclosed display
+transformations are preserved. File publication or posting failure remains secondary
+to a successful Incident lifecycle.
+
+The digest basename binds a printed command to its generated body across later
+helper invocations; it is provenance, not an immutable security boundary. The file
+remains mutable under the Run's existing filesystem authority. This interface avoids
+embedding the body in shell syntax. It does not establish why native Claude denied
+the captured valid inline command: native permission admission and exact live posted
+body read-back remain separate acceptance checks.

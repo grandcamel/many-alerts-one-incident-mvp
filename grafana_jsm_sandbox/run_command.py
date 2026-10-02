@@ -46,8 +46,9 @@ JIRA_AS = "Bash(jira-as *)"
 
 INCIDENT_PAYLOAD = "Bash(incident-payload *)"
 """Building the Jira payloads: a local command that reads the Notification and the project's
-facts, and prints jira-as lines. It opens no socket, starts no process and writes no file, so
-it adds no reach (ADR 0003's 2026-10-01 amendment)."""
+facts, and prints jira-as lines. Investigation alone publishes a bounded UTF-8 ADF body
+under the current Run directory for --body-file; other steps write no file. It opens no
+socket, starts no process and adds no permission rules or Forwarder authority (ADR 0003)."""
 
 GRAFANA_QUERY = "Bash(grafana-query *)"
 """Read-only Grafana queries authenticated with a Viewer token, only when enabled."""

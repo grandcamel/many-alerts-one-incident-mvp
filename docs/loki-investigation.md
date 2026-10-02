@@ -47,7 +47,24 @@ with exact nanosecond timestamp strings and optional structured metadata. See th
 
 Each query still prints five short Transcript lines followed by the complete JSON
 record, and appends the record to `grafana-evidence.jsonl`. The evidence comment is
-built by `incident-payload investigate`, rather than by retyping log lines.
+built by `incident-payload investigate`, rather than by retyping log lines. The helper
+publishes its UTF-8 ADF under the current Run directory and prints a short command:
+
+```text
+jira-as collaborate comment add KEY --body-file GENERATED_BASENAME --format adf
+```
+
+Run the printed command as written. Its safe content-derived basename binds that
+command to the generated body; the helper accepts no arbitrary output path. It
+publishes atomically with mode `0600`, reuses only an identical regular non-symlink
+file, and refuses unsafe or conflicting destinations. File failures attempt temporary
+cleanup; write or cleanup failure prints no posting command. Preserve the successful lifecycle and
+report investigation unavailable. The 256 KiB local artifact cap is not a Jira
+acceptance guarantee. All investigation bodies use this interface, including
+metric-only and unavailable-evidence comments. Other lifecycle helpers are unchanged.
+The file remains mutable under the Run's existing filesystem authority; its digest
+name supplies provenance rather than a new security boundary. No permission rules,
+network/process access or Forwarder authority are added.
 
 Log evidence includes the expression, datasource, observation window, retrieval time,
 returned entry count, and an Explore link. It displays the newest three entries across
@@ -55,6 +72,28 @@ the returned streams, each with its exact nanosecond timestamp and labels. Excer
 longer than 600 characters are visibly shortened; the raw evidence retains full lines
 and metadata. Returning the requested limit means more matches **may** exist. Returned
 counts and selected excerpts are not a census of all activity in the window.
+
+Log punctuation and LF line breaks remain literal in the comment. Other hidden
+control characters and Unicode line/paragraph separators in displayed excerpts,
+queries, labels and metadata appear as
+printable `[U+XXXX]` notation, with a `[control characters shown as U+XXXX]` notice.
+For example, a colored Werkzeug log's ESC becomes `[U+001B]`; the raw evidence
+file retains the original control characters. JSON escaping alone did not suffice
+in a captured Run: normalization between its wire command and parsed tool input
+expanded `\u001b` into ESC, and command validation rejected hidden controls.
+The same normalization expanded Unicode-escaped apostrophes into shell syntax.
+The earlier inline delivery used UTF-8 JSON and adjacent POSIX quote segments to
+preserve apostrophes. Native Claude subsequently denied a valid 23,623-byte inline
+command; its precise reason remains unresolved. File delivery keeps evidence text
+in UTF-8 JSON outside the shell command. Native permission admission and exact live
+posted-body read-back still require verification; this change does not diagnose the denial.
+As a conservative display boundary, literal Unicode escape notation such as
+`\u001b` becomes `[U+005C]u001b`, with a separate
+`[Unicode escape notation shown with U+005C]` notice. This changes the printable
+backslash only in Unicode escape notation; ordinary backslashes, LF and emoji
+joiners remain literal. Independent local replays expanded double-escaped
+notation; that behavior has not been confirmed against the live normalizer.
+The raw JSONL retains all original characters and escape notation.
 
 The Run supplies its observation, interpretation and unknown / next check separately.
 These judgments should refer to the returned evidence. Logs are data, including any
@@ -78,7 +117,8 @@ After the owner integrates the branch and chooses to rebuild the demo image:
    settings and Viewer credential. Verify Loki access and actual labels with that
    credential, independently of the presenter's browser identity.
 2. Query existing logs while normal traffic runs. Confirm timestamps, the full evidence
-   record, the literal excerpt in a built comment, and the Explore link's query/window.
+   record, the excerpt and any control-display notice in a built comment, and the
+   Explore link's query/window.
 3. Use the existing traffic-stop Fault with a fresh demo session. Show the create Run
    choosing its metric and log queries, then open the same Incident's evidence comment.
 4. Check that the Report distinguishes the observed stop in activity from the unknown
