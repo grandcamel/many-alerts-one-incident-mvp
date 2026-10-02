@@ -494,6 +494,7 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
             assert "investigation recorded" in finishes[0]
             assert record["presenter_link"].startswith(PRESENTER_URL + "/explore?")
             assert "Open in Grafana" in marked[0]
+            assert QUERY in marked[0]
         assert record["query"] == QUERY
         if case.startswith("loki-"):
             [log_record] = log_records
@@ -502,7 +503,13 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
             if case == "loki-success":
                 assert log_record["status"] == "ok"
                 assert LOG_LINE in marked[0]
-                assert "1700000000123456789" in marked[0]
+                assert " | 2023-11-14T22:13:20.123Z WARN " + LOG_LINE in marked[0]
+                assert all(field not in marked[0] for field in (
+                    "timestamp_ns=", "labels=", "metadata=", "1700000000123456789"))
+                excerpt = log_record["log_summary"]["excerpts"][0]
+                assert excerpt["timestamp_ns"] == "1700000000123456789"
+                assert excerpt["labels"] == {"service_name": "rolldice", "severity_text": "WARN"}
+                assert excerpt["metadata"] == {"trace_id": "abc123"}
                 assert "rolldice" in marked[0]
             elif case == "loki-empty":
                 assert log_record["status"] == "empty"

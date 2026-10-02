@@ -1146,12 +1146,12 @@ def test_investigation_punctuation_link_and_real_jira_conversion(tmp_path, query
     assert [node["text"] for node in nodes if node.get("marks") == [{"type": "strong"}]] == [
         "Observation:", "Interpretation:", "Unknown / next check:", "Evidence:"]
     assert [node["text"] for node in nodes if node.get("marks") == [{"type": "code"}]] == [
-        plain(query)]
+        query]
     rendered = "".join(node["text"] for node in nodes)
     assert rendered == (
         "[grafana-investigation] Observation: zero ’requests’ seen | Interpretation: "
         "uncertain ”＄why” | Unknown / next check: check ˋtrafficˋ⧵source | Evidence: "
-        f"{plain(query)} (prometheus, 2026-10-01T14:00:00.000Z..2026-10-01T14:10:00.000Z, "
+        f"{query} (prometheus, 2026-10-01T14:00:00.000Z..2026-10-01T14:10:00.000Z, "
         "step 10s; retrieved 2026-10-01T14:10:00.000Z): observed zero Open in Grafana")
     links = [mark["attrs"]["href"] for node in nodes for mark in node.get("marks", [])
              if mark["type"] == "link"]
@@ -1161,6 +1161,44 @@ def test_investigation_punctuation_link_and_real_jira_conversion(tmp_path, query
     panes = json.loads(parse_qs(urlsplit(links[0]).query)["panes"][0])
     assert panes["A"]["queries"][0]["expr"] == record["query"]
     assert json.loads((working / "grafana-evidence.jsonl").read_text()) == record
+
+
+@pytest.mark.parametrize("command", ["instant", "range", "get"])
+@pytest.mark.parametrize("query,displayed,notice", [
+    ('service_name="rolldice"', 'service_name="rolldice"', None),
+    ("worker's \"metric\"\nnext\\line $HOME `literal` café 🎲 👩‍💻\x1b\u2028\u2029",
+     "worker's \"metric\"\nnext\\line $HOME `literal` café 🎲 👩‍💻[U+001B][U+2028][U+2029]",
+     "[control characters shown as U+XXXX]"),
+    (r"worker\u001b", "worker[U+005C]u001b", "[Unicode escape notation shown with U+005C]"),
+])
+def test_metric_and_get_queries_use_literal_display_with_notices(tmp_path, command, query,
+                                                               displayed, notice):
+    from urllib.parse import urlencode
+
+    record = evidence_record(command=command, query=query)
+    if command == "get":
+        # GET has no expression; its displayed query is the path plus encoded parameters.
+        record["path"] += "/" + query
+    original = (json.dumps(record) + "\n").encode()
+
+    line, working = investigate_on(tmp_path, [record])
+    body = json.loads(investigation_artifact_body(line, working))
+    nodes = body["content"][0]["content"]
+    expected = ("GET /api/v1/labels/" + displayed + "?" + urlencode(dict(record["parameters"]))
+                if command == "get" else displayed)
+    assert [node["text"] for node in nodes if node.get("marks") == [{"type": "code"}]] == [expected]
+    text = investigation_body(line, working)
+    notices = [node["text"].strip() for node in nodes
+               if node["text"].startswith(" [control characters shown")
+               or node["text"].startswith(" [Unicode escape notation shown")]
+    assert notices == ([notice] if notice else [])
+    assert "Observation: zero ’requests’ seen" in text
+    assert "Interpretation: uncertain ”＄why”" in text
+    assert (working / "grafana-evidence.jsonl").read_bytes() == original
+    pytest.importorskip("jira_as")
+    from jira_as.compat.richtext import richtext
+
+    assert richtext(investigation_artifact_body(line, working), "adf") == body
 
 
 @pytest.mark.parametrize("status, expected", [("empty", "no data"), ("ok", "observed zero")])

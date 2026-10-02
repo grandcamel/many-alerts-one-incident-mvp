@@ -68,14 +68,25 @@ network/process access or Forwarder authority are added.
 
 Log evidence includes the expression, datasource, observation window, retrieval time,
 returned entry count, and an Explore link. It displays the newest three entries across
-the returned streams, each with its exact nanosecond timestamp and labels. Excerpts
-longer than 600 characters are visibly shortened; the raw evidence retains full lines
-and metadata. Returning the requested limit means more matches **may** exist. Returned
+the returned streams. Each excerpt shows UTC RFC3339 time with milliseconds and `Z`,
+then the `severity_text` label if present, otherwise the upper-cased `detected_level`
+label if present, then the code-marked log line. Nanoseconds are converted using exact
+integer arithmetic and truncated to milliseconds; for example,
+`1790921976660267264` displays as `2026-10-02T06:19:36.660Z`. Labels, structured metadata
+and the exact nanosecond timestamp remain in `grafana-evidence.jsonl` and accessible
+through Explore, rather than appearing before the line in the comment. Excerpts
+longer than 600 characters retain the `[truncated to 600 characters]` notice; an empty
+line displays as `[empty log line]`. Raw evidence retains full lines and metadata.
+Returning the requested limit means more matches **may** exist. Returned
 counts and selected excerpts are not a census of all activity in the window.
 
-Log punctuation and LF line breaks remain literal in the comment. Other hidden
-control characters and Unicode line/paragraph separators in displayed excerpts,
-queries, labels and metadata appear as
+Log punctuation and LF line breaks remain literal in the comment. Every command's
+displayed query (`instant`, `range`, `get`, `logs`, `traces`, `trace`) uses the same
+literal display, so PromQL retains `service_name="rolldice"` with straight quotes.
+For `get`, this is the GET path and URL-encoded parameters. The Run's observation,
+interpretation and unknown / next check retain their existing plain-text rendering.
+Other hidden control characters and Unicode line/paragraph separators in displayed
+log lines, severity and queries appear as
 printable `[U+XXXX]` notation, with a `[control characters shown as U+XXXX]` notice.
 For example, a colored Werkzeug log's ESC becomes `[U+001B]`; the raw evidence
 file retains the original control characters. JSON escaping alone did not suffice

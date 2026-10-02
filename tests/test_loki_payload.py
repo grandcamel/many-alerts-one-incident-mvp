@@ -18,7 +18,7 @@ START = "2026-10-01T14:00:00.000Z"
 END = "2026-10-01T14:10:00.000Z"
 STAMP = "1790863799123456789"
 LINE = "worker's message: \"warning\"\nnext\\line $HOME `literal` café 🎲"
-LABELS = {"service_name": "rolldice", "severity": "WARN"}
+LABELS = {"service_name": "rolldice", "severity_text": "WARN"}
 
 
 def logs_record():
@@ -61,18 +61,72 @@ def investigation(tmp_path, records):
     return command, nodes, "".join(node.get("text", "") for node in nodes)
 
 
-def test_investigation_renders_literal_log_excerpt_with_exact_timestamp_and_link(tmp_path):
+def test_investigation_renders_literal_log_excerpt_with_utc_time_severity_and_link(tmp_path):
     record = logs_record()
     command, nodes, text = investigation(tmp_path, [record])
 
     assert "\n" not in command and len(shlex.split(command)) == 9
     assert "1 returned log entries" in text
-    assert STAMP in text and '"service_name":"rolldice"' in text
-    assert LINE in [node.get("text") for node in nodes]
+    assert " | 2026-10-01T14:09:59.123Z WARN " + LINE in text
+    assert {"type": "text", "text": LINE, "marks": [{"type": "code"}]} in nodes
+    assert all(field not in text for field in ("timestamp_ns=", "labels=", "metadata=", STAMP))
     assert "[control characters shown as U+XXXX]" not in text
-    assert '"trace_id":"trace\'one"' in text
+    assert "trace'one" not in text
     assert [mark["attrs"]["href"] for node in nodes for mark in node.get("marks", [])
             if mark["type"] == "link"] == [record["presenter_link"]]
+    saved = tmp_path / "runs" / "20261001T140210-abc123" / EVIDENCE_FILENAME
+    assert saved.read_bytes() == (json.dumps(record) + "\n").encode()
+    excerpt = json.loads(saved.read_text())["log_summary"]["excerpts"][0]
+    assert excerpt["timestamp_ns"] == STAMP
+    assert excerpt["labels"] == LABELS
+    assert excerpt["metadata"] == {"trace_id": "trace'one"}
+
+
+@pytest.mark.parametrize("timestamp,expected", [
+    ("1790921976660267264", "2026-10-02T06:19:36.660Z"),
+    ("1790921976999999999", "2026-10-02T06:19:36.999Z"),
+    ("0", "1970-01-01T00:00:00.000Z"),
+    ("999999", "1970-01-01T00:00:00.000Z"),
+    ("1000000", "1970-01-01T00:00:00.001Z"),
+    ("253402300799999999999", "9999-12-31T23:59:59.999Z"),
+])
+def test_log_timestamp_display_truncates_to_exact_utc_milliseconds(tmp_path, timestamp, expected):
+    record = logs_record()
+    record["response"]["data"]["result"][0]["values"][0][0] = timestamp
+    record["log_summary"] = summarize_logs(record["response"], 100)
+
+    command, _, text = investigation(tmp_path, [record])
+
+    assert f" | {expected} WARN " + LINE in text
+    pytest.importorskip("jira_as")
+    from jira_as.compat.richtext import richtext
+
+    body = delivered_adf(command, tmp_path)
+    assert richtext(json.dumps(body), "adf") == body
+
+
+@pytest.mark.parametrize("labels,severity", [
+    ({"severity_text": "Warn", "detected_level": "error"}, "Warn"),
+    ({"detected_level": "warning"}, "WARNING"),
+    ({"severity": "ERROR"}, ""),
+    ({}, ""),
+    ({"severity_text": "", "detected_level": "error"}, ""),
+    ({"severity_text": "WARN\x1b"}, "WARN[U+001B]"),
+    ({"severity_text": r"WARN\u001b"}, "WARN[U+005C]u001b"),
+])
+def test_log_severity_precedes_code_marked_line_and_uses_only_known_labels(tmp_path, labels, severity):
+    record = logs_record()
+    record["response"]["data"]["result"][0]["stream"] = labels
+    record["log_summary"] = summarize_logs(record["response"], 100)
+
+    _, nodes, text = investigation(tmp_path, [record])
+
+    prefix = " | 2026-10-01T14:09:59.123Z " + (severity + " " if severity else "")
+    index = next(i for i, node in enumerate(nodes) if node.get("text") == LINE)
+    assert nodes[index - 1] == {"type": "text", "text": prefix}
+    assert nodes[index]["marks"] == [{"type": "code"}]
+    assert prefix + LINE in text
+    assert all(field not in text for field in ("timestamp_ns=", "labels=", "metadata="))
 
 
 @pytest.mark.parametrize("change", [
@@ -201,7 +255,7 @@ def test_empty_log_lines_keep_valid_adf_and_an_explicit_empty_line_display(tmp_p
     _, nodes, text = investigation(tmp_path, [record])
 
     assert all(node["text"] for node in nodes if node["type"] == "text")
-    assert STAMP in text and "[empty log line]" in text
+    assert " | 2026-10-01T14:09:59.123Z WARN [empty log line]" in text
 
 
 def test_colored_werkzeug_excerpt_survives_observed_command_normalization(tmp_path):
@@ -261,15 +315,16 @@ def test_loki_display_controls_are_printable_without_rewriting_raw_evidence(tmp_
     assert not any(unicodedata.category(character) == "Cc" for character in normalized)
     assert not any(unicodedata.category(character) == "Cc" and character != "\n"
                    for character in text)
-    assert "[U+0000][U+0007][U+001B][U+007F][U+0085][U+0009][U+000D]" in text
-    assert "[control characters shown as U+XXXX]" in text
+    displayed = location in ("line", "query")
+    assert ("[U+0000][U+0007][U+001B][U+007F][U+0085][U+0009][U+000D]" in text) == displayed
+    assert ("[control characters shown as U+XXXX]" in text) == displayed
     assert "café 🎲" in text
     saved = tmp_path / "runs" / "20261001T140210-abc123" / EVIDENCE_FILENAME
     assert saved.read_bytes() == original_bytes
 
 
 @pytest.mark.parametrize("location", ["labels", "metadata"])
-def test_display_control_notation_preserves_entries_with_colliding_key_spellings(tmp_path, location):
+def test_undisplayed_fields_preserve_entries_with_colliding_key_spellings(tmp_path, location):
     record = logs_record()
     fields = {"\x1b": "actual control", "[U+001B]": "literal notation"}
     stream = record["response"]["data"]["result"][0]
@@ -282,8 +337,9 @@ def test_display_control_notation_preserves_entries_with_colliding_key_spellings
 
     _, _, text = investigation(tmp_path, [record])
 
-    assert f'{location}={{"[U+001B]":"actual control","[U+001B]":"literal notation"}}' in text
-    assert "[control characters shown as U+XXXX]" in text
+    assert "actual control" not in text and "literal notation" not in text
+    assert "[control characters shown as U+XXXX]" not in text
+    assert all(field not in text for field in ("timestamp_ns=", "labels=", "metadata="))
     saved = tmp_path / "runs" / "20261001T140210-abc123" / EVIDENCE_FILENAME
     assert saved.read_bytes() == original_bytes
 
@@ -359,10 +415,9 @@ def test_literal_unicode_escape_notation_is_disclosed_and_survives_normalization
     assert normalized == command, "literal Unicode notation still expands in the replay"
     assert delivered_adf(command, tmp_path) == delivered_adf(normalized, tmp_path)
     assert len(command.splitlines()) == 1
-    expected = (displayed if location in ("line", "query")
-                else json.dumps(displayed, ensure_ascii=False)[1:-1])
-    assert expected in text
-    assert "[Unicode escape notation shown with U+005C]" in text
+    visible = location in ("line", "query")
+    assert (displayed in text) == visible
+    assert ("[Unicode escape notation shown with U+005C]" in text) == visible
     assert "[control characters shown as U+XXXX]" not in text
     saved = tmp_path / "runs" / "20261001T140210-abc123" / EVIDENCE_FILENAME
     assert saved.read_bytes() == original_bytes

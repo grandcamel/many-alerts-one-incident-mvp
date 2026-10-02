@@ -65,7 +65,7 @@ import sys
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
@@ -963,14 +963,6 @@ def _display_evidence_notices(*texts: str) -> list[dict]:
     return notices
 
 
-def _display_log_fields(fields: dict[str, str]) -> tuple[str, bool]:
-    """Render each entry without merging keys that share a printable spelling."""
-    pairs = [(_display_evidence_text(key), _display_evidence_text(value))
-             for key, value in fields.items()]
-    text = "{" + ",".join(f"{compact(key)}:{compact(value)}" for key, value in pairs) + "}"
-    return text, pairs != list(fields.items())
-
-
 def evidence_display(record: dict) -> list[dict]:
     """ADF keeps log punctuation, discloses hidden controls and links to exact evidence."""
     query = record["query"]
@@ -993,31 +985,32 @@ def evidence_display(record: dict) -> list[dict]:
         "type": "text", "text": "Open in Grafana",
         "marks": [{"type": "link", "attrs": {"href": link}}],
     }
-    literal = record["command"] in ("logs", "traces", "trace")
-    display_query = _display_evidence_text(query) if literal else plain(query)
+    display_query = _display_evidence_text(query)
     nodes = [
         {"type": "text", "text": display_query,
          "marks": [{"type": "code"}]},
         {"type": "text", "text": f" ({plain(context)}): {plain(evidence_result(record))} "},
         destination,
     ]
-    if literal and display_query != query:
+    if display_query != query:
         nodes[1:1] = _display_evidence_notices(query)
     if record["command"] == "logs" and record["log_summary"] is not None:
         for excerpt in record["log_summary"]["excerpts"]:
             line = _display_evidence_text(excerpt["line"])
-            labels, labels_changed = _display_log_fields(excerpt["labels"])
-            metadata, metadata_changed = _display_log_fields(excerpt["metadata"])
+            time = (datetime(1970, 1, 1, tzinfo=UTC) + timedelta(
+                milliseconds=int(excerpt["timestamp_ns"]) // 1_000_000,
+            )).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            labels = excerpt["labels"]
+            severity = labels.get("severity_text", labels.get("detected_level", "").upper())
+            display_severity = _display_evidence_text(severity)
             nodes.extend([
-                {"type": "text", "text": f" | timestamp_ns={excerpt['timestamp_ns']} "
-                 f"labels={labels} metadata={metadata} "},
+                {"type": "text", "text": f" | {time} "
+                 + (f"{display_severity} " if display_severity else "")},
                 ({"type": "text", "text": line, "marks": [{"type": "code"}]}
                  if line else {"type": "text", "text": "[empty log line]"}),
             ])
-            if line != excerpt["line"] or labels_changed or metadata_changed:
-                nodes.extend(_display_evidence_notices(
-                    excerpt["line"], *excerpt["labels"].keys(), *excerpt["labels"].values(),
-                    *excerpt["metadata"].keys(), *excerpt["metadata"].values()))
+            if line != excerpt["line"] or display_severity != severity:
+                nodes.extend(_display_evidence_notices(excerpt["line"], severity))
             if excerpt["truncated"]:
                 nodes.append({"type": "text", "text": " [truncated to 600 characters]"})
     if record["command"] in ("traces", "trace") and record["trace_summary"] is not None:

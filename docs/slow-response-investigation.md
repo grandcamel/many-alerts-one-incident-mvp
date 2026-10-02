@@ -104,7 +104,9 @@ PARTIAL, missing parents, reached limits and missing data remain visible. Backen
 COMPLETE does not establish complete ingestion. No matches means no returned matches
 for that query and window; HTTP failure is unavailable, not an empty success.
 
-Hidden characters and literal Unicode escape notation use the same disclosed
+Displayed queries for all commands, including Prometheus, Loki and Tempo, preserve
+literal punctuation and line breaks. Hidden characters and literal Unicode escape
+notation use the same disclosed
 printable representations as [Loki evidence](loki-investigation.md#evidence-in-the-incident).
 The original text remains in raw evidence, and presenter links retain the exact query.
 
