@@ -4,6 +4,9 @@
 Jira Service Management project with a real Claude Run, and a replay against the local fake Jira covers a custom
 Incident workflow.
 
+That evidence covers the lifecycle demo. The optional Grafana investigation below still needs
+its pinned-image probe and real-model acceptance; a lifecycle `VERIFIED` does not establish those.
+
 The whole stack, a real Run included, can be rehearsed without a real Jira against a local fake one, on either the stock
 or a custom Incident workflow: `docs/local-fake-jira-rehearsal.md`.
 
@@ -23,6 +26,9 @@ service closes it. The design is in `docs/mvp-spec.md`.
 | `$JIRA_EMAIL` / `$JIRA_API_TOKEN` | An account that can create, edit, comment on and transition issues in that project |
 | `$ANTHROPIC_API_KEY` | An Anthropic API key (or set `CLAUDE_CODE_OAUTH_TOKEN` instead; exactly one) |
 | `$DEMO_SESSION_ID` | `[a-z0-9-]{1,32}`, starting with a letter, with no hyphen before a digit (jira-as would read `reh-1` as an issue key). Use a new value for every take, rehearsals and the demo itself (`opus1`, `sonnet1`, `haiku1`, …; section 5) |
+
+The four optional investigation variables and their defaults are in the next section. Leave them
+commented for the existing lifecycle demo.
 
 ## 0. Prerequisites
 
@@ -51,6 +57,101 @@ cp .env.example .env
 Fill in `JIRA_SITE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `DEMO_PROJECT_KEY`, `ANTHROPIC_API_KEY` and
 `DEMO_SESSION_ID`. Leave `CLAUDE_CODE_OAUTH_TOKEN` empty: use exactly one model credential. **Never paste a token into
 chat.** Claude never reads `.env`; the repo's settings deny it.
+
+### Optional Grafana investigation
+
+Investigation is opt-in and secondary to the lifecycle. Only the Run that creates the Incident
+investigates, after the create and opening comment succeed. It chooses current read-only PromQL
+queries and discovery GETs, then posts one evidence comment on that same confirmed Incident.
+Updates, repeats, related-alert updates and resolved Notifications do not investigate. It never
+creates an Incident just to hold evidence.
+
+| Variable | Default and operator choice |
+|---|---|
+| `DEMO_INVESTIGATION_ENABLED` | Absent or blank is false; `true`, `false`, `1`, `0` are accepted case-insensitively. Set `DEMO_INVESTIGATION_ENABLED=true` to opt in. |
+| `DEMO_GRAFANA_URL` | The image sets `http://lgtm:3000`. On a laptop, absent defaults to `http://localhost:3000`; explicitly override the internal URL when needed. |
+| `DEMO_GRAFANA_PRESENTER_URL` | Absent defaults to `http://localhost:<GRAFANA_HOST_PORT>`; the port defaults to `3000`. Set an override only when the presenter's browser needs a different base URL. |
+| `DEMO_GRAFANA_VIEWER_TOKEN` | No default; privately supply the Viewer service-account token when enabling investigation. |
+
+Enabled startup refuses a missing/blank token or malformed URL before listening. URLs must be
+absolute HTTP/HTTPS with a hostname and valid port, without credentials, query or fragment; a base
+path is allowed. An explicit blank URL is an error. The token is trimmed and must have no CR/LF.
+Disabled startup ignores the three Grafana values. Compose carries the resolved
+`${GRAFANA_HOST_PORT:-3000}` into the Receiver, including a shell port override, for default
+presenter links; the Run receives only the four investigation variables.
+
+**Manual Viewer token, after the stack starts:**
+
+1. Using the presenter's Admin access in Grafana, create a service account with role Viewer,
+   then create its token. Token creation is manual; give the Run the Viewer token only.
+2. In your own editor, enter it as `DEMO_GRAFANA_VIEWER_TOKEN` in the ignored mode-0600 `.env`.
+   Keep the token out of chat, commands, Transcripts and committed files. Enable investigation
+   with `DEMO_INVESTIGATION_ENABLED=true`; leave the presenter URL override commented when
+   its default is right.
+3. Recreate the demo service to load the changed environment:
+
+   ```bash
+   docker compose up -d --force-recreate demo
+   ```
+
+   A restart keeps the old environment. Recreate the Viewer account/token after `lgtm` is
+   recreated: `/data/grafana` has no persistent volume in this Compose setup. A 401 is reported
+   as `grafana-query: unavailable: token rejected`.
+4. With separate permission for stack work, probe the installed `grafana-query` with the Viewer
+   token against the pinned `grafana/otel-lgtm:0.33.0` before live acceptance. This free local
+   probe uses no model and no Jira. Check the datasource-proxy GET path, Viewer access, query
+   output, and the Explore link in the presenter's browser. Viewer Explore access is not assumed.
+
+The CLI reads its environment only, never an env file. All flags follow the subcommand:
+
+| Invocation | Flags |
+|---|---|
+| `grafana-query instant --query EXPR` | `--datasource UID` defaults to `prometheus`; `--time TIME` defaults to `now`. |
+| `grafana-query range --query EXPR` | `--datasource UID` defaults to `prometheus`; `--start TIME` to `now-10m`, `--end TIME` to `now`, `--step DURATION` to `10s`. |
+| `grafana-query get --path PATH` | `--datasource UID` defaults to `prometheus`; repeat `--param NAME=VALUE` for discovery parameters. Paths include `/api/v1/labels`, `/api/v1/series` and `/api/v1/metadata`. |
+
+There are no URL, token, output-path or timeout flags. Direct invocation validates the Grafana
+URLs and token even when the enable flag is false; that flag controls Receiver wiring.
+Arbitrary PromQL and discovery GETs are allowed. The per-request elapsed timeout is ten seconds;
+the existing Run timeout still applies. There is no query menu, attempt budget, retry policy,
+response-size limit, sample cap or observation-window cap. The first five output lines form the
+compact Transcript summary; line six and the appended `grafana-evidence.jsonl` in that Run's
+directory retain the complete JSON evidence. `incident-payload investigate --key KEY --observation
+TEXT --interpretation TEXT --unknown TEXT` builds the single evidence comment mechanically from
+that file, with the exact `[grafana-investigation] ` prefix and the Run's three judgments.
+Investigation comments do not count as lifecycle Runs in the closing comment or verifier.
+
+**Presenter and fallback:** say, “These queries authenticate with a Viewer token.” Grafana still
+allows anonymous Admin; Grafana query traffic bypasses the Jira Forwarder. A Run holds its model
+credential and, when enabled, a Grafana Viewer credential; Jira still uses the Forwarder sentinel.
+Presenter links open in the presenter's browser under its identity, not the Run's token. Show the
+evidence comment on the live-fault path and check its Observation, Interpretation and Unknown /
+next check against the full evidence. Keep returned zero, no data and unavailable distinct.
+Missing error series do not establish zero errors; fresh telemetry does not establish a healthy
+application; absent traffic does not explain why it stopped.
+
+All four rules derive from `http_server_duration_milliseconds_count` for `service_name="rolldice"`
+(with `http_status_code` for response labels). The rule called a health probe is another view of
+completed requests, not an independent reachability check. Querying that metric adds context,
+not independent corroboration. `checkout-outage` is a demonstration group label, not proof of a
+checkout service. Supply metric/label names and syntax, never an expected diagnosis. A replay
+investigates the current system: record actual query times, not the replay's historical window.
+Do not claim measured time savings or autonomous root-cause discovery.
+
+Before any paid Run or live Jira write, settle site/project/session, model, dollar cap, acceptable
+added delay and go/no-go. Real-model acceptance needs the installed command inside the demo
+container, a faithful evidence comment on the same real Incident, the complete lifecycle and an
+unavailable-evidence rehearsal. Record added latency, queue delay and displayed model cost against
+a disabled baseline. A follow-up query is optional. Report offline, container, scripted/fake-Jira/model,
+real-Jira replay and live-Grafana evidence separately; source checks and stand-ins are not live acceptance.
+
+If investigation misses or misstates evidence, set `DEMO_INVESTIGATION_ENABLED=false` privately
+and recreate demo with the command above; retain the existing lifecycle demo and record the gap.
+An investigation query, builder or post failure must preserve a successful lifecycle Finish's
+`ok: ` first line. Inspect whether the Incident line says `investigation recorded` or
+`investigation unavailable (<reason>)`; a failed post must not be presented as recorded. A proposed
+rehearsal target is at most 30 added seconds on the create Run, subject to the owner's go/no-go;
+it is not a CLI cap. Aim to freeze changes six hours before rehearsal/recovery.
 
 ## 3. Setup, driven by the repo's own skill
 

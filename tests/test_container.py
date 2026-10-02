@@ -547,9 +547,15 @@ class TestAStackThatIsUp:
         assert "{{" not in read.stdout
 
     def test_a_run_would_find_the_tools_it_is_allowed_to_use(self):
-        for tool in ("claude", "jira-as", "incident-payload"):
+        for tool in ("claude", "jira-as", "incident-payload", "grafana-query"):
             found = compose("exec", "-T", DEMO_SERVICE, "sh", "-c", f"command -v {tool}")
             assert found.returncode == 0, f"{tool} is not on the Run's PATH"
+
+    def test_the_installed_grafana_query_can_load_its_module(self):
+        helped = compose("exec", "-T", DEMO_SERVICE, "grafana-query", "--help")
+
+        assert helped.returncode == 0, helped.stderr
+        assert helped.stdout.startswith("usage: grafana-query")
 
 
 def _as_list(value) -> list[str]:
@@ -666,7 +672,7 @@ def test_the_user_the_container_ends_as_was_created_by_this_dockerfile():
 
 
 INCIDENT_PAYLOAD_LAUNCHER = REPOSITORY / "docker" / "incident-payload"
-"""The one other command a Run may execute, as the image puts it on the PATH (ADR 0003's
+"""The local payload command, as the image puts it on the PATH (ADR 0003's
 2026-10-01 amendment)."""
 
 
@@ -698,6 +704,77 @@ def test_the_launcher_runs_the_package_s_incident_payload_in_isolated_mode(tmp_p
 
     assert ran.returncode == 0, ran.stderr
     assert ran.stdout.startswith("usage: incident-payload")
+
+
+GRAFANA_QUERY_LAUNCHER = REPOSITORY / "docker" / "grafana-query"
+INVESTIGATION_VARIABLES = (
+    "DEMO_INVESTIGATION_ENABLED",
+    "DEMO_GRAFANA_URL",
+    "DEMO_GRAFANA_PRESENTER_URL",
+    "DEMO_GRAFANA_VIEWER_TOKEN",
+)
+
+
+def test_grafana_query_is_installed_in_isolated_mode_beside_incident_payload():
+    assert (
+        "COPY --chmod=0755 docker/grafana-query /usr/local/bin/grafana-query"
+        in dockerfile_instructions()
+    )
+    launcher = GRAFANA_QUERY_LAUNCHER.read_text()
+    assert launcher.splitlines()[0] == "#!/usr/bin/python3 -I"
+    assert 'sys.path.insert(0, "/app")' in launcher
+    assert "from grafana_jsm_sandbox.grafana_query import main" in launcher
+    assert "raise SystemExit(main())" in launcher
+
+
+def test_the_grafana_launcher_runs_the_query_cli_from_the_image_package(tmp_path):
+    """Needs lane A's module; a missing dependency is not an installed-command pass."""
+    launcher = GRAFANA_QUERY_LAUNCHER.read_text()
+    if not (REPOSITORY / "grafana_jsm_sandbox" / "grafana_query.py").is_file():
+        pytest.skip("lane A's grafana_query module has not been composed into this worktree")
+    script = tmp_path / "grafana-query"
+    script.write_text(launcher.replace('"/app"', repr(str(REPOSITORY))))
+    ran = subprocess.run(
+        [sys.executable, "-I", str(script), "--help"],
+        cwd=tmp_path,
+        env={},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.startswith("usage: grafana-query")
+    assert all(command in ran.stdout for command in ("instant", "range", "get"))
+
+
+def test_the_image_defaults_to_internal_grafana_without_enabling_investigation():
+    variables = environment_set_by(DOCKERFILE)
+    assert variables["DEMO_GRAFANA_URL"][1] == "http://lgtm:3000"
+    assert "DEMO_INVESTIGATION_ENABLED" not in variables
+    assert "DEMO_GRAFANA_VIEWER_TOKEN" not in variables
+    assert "DEMO_GRAFANA_PRESENTER_URL" not in variables
+
+
+@pytest.mark.parametrize("port", [None, "", "13000"])
+def test_compose_hands_the_resolved_grafana_port_to_the_receiver(port):
+    environment = {} if port is None else {GRAFANA_HOST_PORT_VARIABLE: port}
+    declared = service(DEMO_SERVICE)["environment"][GRAFANA_HOST_PORT_VARIABLE]
+    assert declared == "${GRAFANA_HOST_PORT:-3000}"
+    resolved = int(interpolated(declared, environment))
+    [(_, published, _)] = publications(LGTM_SERVICE, environment)
+    assert resolved == published
+
+
+def test_the_example_leaves_all_four_investigation_variables_commented_and_token_empty():
+    example = ENV_EXAMPLE.read_text()
+    assert not set(INVESTIGATION_VARIABLES) & env_example().keys()
+    for variable in INVESTIGATION_VARIABLES:
+        assert re.search(rf"^# {variable}=.*$", example, re.MULTILINE)
+    assert "# DEMO_INVESTIGATION_ENABLED=false\n" in example
+    assert "# DEMO_GRAFANA_URL=http://lgtm:3000\n" in example
+    assert "# DEMO_GRAFANA_VIEWER_TOKEN=\n" in example
 
 
 ENTRYPOINT = REPOSITORY / "docker" / "entrypoint.sh"

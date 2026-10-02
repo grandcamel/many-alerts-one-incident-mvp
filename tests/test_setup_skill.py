@@ -275,3 +275,24 @@ def test_it_leaves_the_run_s_skill_to_the_receiver():
         for command in bash_commands(document):
             assert "skill/incident-sync" not in command, command
     assert any("skill/incident-sync/SKILL.md" in line for line in prose(SKILL))
+
+
+def test_investigation_setup_defers_live_acceptance_and_retains_the_lifecycle_fallback():
+    body = " ".join(text(SKILL).split())
+    for required in (
+        "Only the Run that creates the Incident",
+        "opening comment succeed",
+        "DEMO_GRAFANA_URL",
+        "DEMO_GRAFANA_PRESENTER_URL",
+        "GRAFANA_HOST_PORT",
+        "presenter's browser",
+        "DEMO_INVESTIGATION_ENABLED=false",
+        "unavailable-evidence rehearsal",
+        "added latency",
+        "queue delay",
+        "displayed model cost",
+        "disabled baseline",
+        "site/project/session, model, dollar cap, acceptable added delay and go/no-go",
+    ):
+        assert required in body, required
+    assert "docs/mvp-runbook.md#optional-grafana-investigation" in body

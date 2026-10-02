@@ -226,7 +226,8 @@ file's comments say where each comes from:
   empty and commented. The Enterprise-seat prerequisite applies only to OAuth.
 - `DEMO_PROJECT_KEY`: the key from stage 1.
 
-They leave the unused model credential empty, keep the other settings as they are, and tell
+They keep the ignored configuration mode-0600. They leave the unused model credential empty,
+keep the four investigation variables commented for now, and tell
 you when the file is saved. Then:
 
 ```bash
@@ -299,6 +300,57 @@ create and comment on Incidents there, with no question from you first.
 
 Done when `doctor --only stack,grafana` ends `READY` and, behind a proxy, the check prints
 `extra-ca.crt`.
+
+### Optional Grafana investigation
+
+Offer this only when the engineer wants evidence on the newly created Incident. Only the Run
+that creates the Incident investigates, after the create and opening comment succeed. Updates,
+repeats, related-alert updates and resolved Notifications do not investigate. Read
+`docs/mvp-runbook.md#optional-grafana-investigation` before proceeding; it defines the CLI,
+evidence, presentation and acceptance steps. There is no optional doctor investigation check.
+
+Hand over the token step: using the presenter's Admin access in Grafana, the engineer creates a
+service account with role Viewer, then its token. They privately enter it as
+`DEMO_GRAFANA_VIEWER_TOKEN` in the ignored mode-0600 configuration in their own editor, and set
+`DEMO_INVESTIGATION_ENABLED=true`. The image defaults `DEMO_GRAFANA_URL` to `http://lgtm:3000`;
+on a laptop, absent defaults to `http://localhost:3000`, so explicitly override it when needed.
+Absent `DEMO_GRAFANA_PRESENTER_URL` defaults to `http://localhost:<GRAFANA_HOST_PORT>` (port
+3000 by default). Keep its override commented when that default reaches the presenter's browser.
+Enabled startup requires the token and valid, nonblank URLs; disabled ignores the Grafana values.
+You never read, create or echo the token. Once the engineer has saved the values:
+
+```bash
+docker compose up -d --force-recreate demo
+```
+
+A restart keeps the old environment. Recreate the Viewer account/token after `lgtm` is recreated:
+`/data/grafana` has no persistent volume here. A 401 reads `grafana-query: unavailable: token rejected`.
+
+With separate permission for stack work, follow the runbook's free pinned-image probe before any
+model or Jira rehearsal: the installed command, datasource-proxy GET, Viewer access, query output
+and Explore link on `grafana/otel-lgtm:0.33.0`. Confirm links in the presenter's browser under its
+identity; Viewer Explore access is not assumed. Say, “These queries authenticate with a Viewer
+token.” Grafana still allows anonymous Admin and its query traffic bypasses the Jira Forwarder.
+
+For any paid Run or live Jira write, first settle site/project/session, model, dollar cap,
+acceptable added delay and go/no-go; the ground rules' consent still applies. Show investigation
+on the live-fault path. A replay queries the current system, with actual query times. Keep zero,
+no data and unavailable distinct and provide metric/label names and syntax, never an expected
+diagnosis. The rule called a health probe counts completed requests rather than independent
+reachability; the runbook gives the other evidence limits.
+
+Real-model acceptance requires the installed tool in the demo container, a faithful evidence
+comment on the same real Incident, the complete lifecycle and an unavailable-evidence rehearsal.
+Record added latency, queue delay and displayed model cost against a disabled baseline. A
+follow-up query is optional. Source checks and stand-ins do not establish live acceptance.
+If investigation misses or misstates evidence, have the engineer set
+`DEMO_INVESTIGATION_ENABLED=false` privately, then recreate demo with the command above and
+retain the existing lifecycle demo. Query, builder and investigation-post failures preserve a
+successful lifecycle's `ok: ` Finish; do not claim a failed post was recorded.
+
+Done when the engineer declined investigation, or the probe and browser check are recorded and
+the engineer knows which real-model acceptance still waits for stage 8's consent. A failed probe
+is a blocker for investigation; retain the lifecycle fallback and report the gap.
 
 ## 7. Model preflight (optional)
 
@@ -419,12 +471,18 @@ Give the engineer, briefly:
   `docs/demo-runbook.md#fifteen-minutes-before-pre-demo-checks`,
   `docs/demo-runbook.md#the-demo-step-by-step`, `docs/demo-runbook.md#fallback-the-replay` and
   `docs/demo-runbook.md#reset-between-takes-or-after-a-bad-one`.
+- **Investigation, if opted in:** `docs/mvp-runbook.md#optional-grafana-investigation` for the
+  live-fault presentation, evidence limits and disabled fallback. Report probe, real-model and
+  unavailable-evidence results separately from lifecycle verification.
 - **Token expiry:** the Jira token's date from stage 4. A new token of either kind goes into
   `.env` in their editor, followed by `docker compose up -d demo`; a `docker compose restart`
   keeps the old environment.
+  The Viewer token must also be recreated after `lgtm` is recreated, then entered privately
+  and loaded by recreating demo.
 - **Teardown:** copy out any Transcript worth keeping first (READING-OUTPUT.md, "A failed
   Run"), then `docker compose down`. Revoke the Jira API token at the address in stage 3, and
   the Claude token from their Claude account or through their Claude org owner. The project
   is the Jira admin's to archive.
+  Revoke the Grafana Viewer token too when investigation was enabled.
 
-Done when the engineer has all three.
+Done when the engineer has the hand-off and, when enabled, the investigation results and fallback.

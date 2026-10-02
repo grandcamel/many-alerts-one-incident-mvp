@@ -1,0 +1,14 @@
+#!/usr/bin/python3 -I
+"""`grafana-query` on a Run's PATH: the package's module, run by the image's own Python.
+
+The package is copied to /app rather than installed, so this puts /app on the path.
+`-I` keeps out anything a Run's environment or working directory could add to it.
+"""
+
+import sys
+
+sys.path.insert(0, "/app")
+
+from grafana_jsm_sandbox.grafana_query import main
+
+raise SystemExit(main())
