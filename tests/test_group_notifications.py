@@ -8,12 +8,11 @@ They are written to the spec, not recorded: the traffic-absence Alert keeps the
 real Fingerprint chapter one recorded, the others' are made up but distinct.
 
 What is asserted is the sequence, because the fixtures only mean anything
-together, and then what the Skill does with each of them: the `jira-as`
-commands the Skill prescribes for that step, in order. The repo has no harness
-that runs the Skill against a fake Jira, so the expected sequence is checked
-against the Skill's own text: every command the step calls for is a command the
-rendered Skill spells out, on one line, and the decision table sends that
-Notification to that step.
+together, and then what a Run does with each of them: the decision table in the
+rendered Skill sends that Notification to that step, and `incident-payload`, run
+on it in a Run's working directory with the Match the step before would have
+left, prints the `jira-as` commands for it, each on one line. The real jira-as
+carries those commands out against the fake Jira in `test_fake_jira.py`.
 """
 
 from __future__ import annotations
@@ -25,9 +24,10 @@ import pytest
 import yaml
 
 from grafana_jsm_sandbox.demo_config import DemoProject
-from grafana_jsm_sandbox.notification import validate_notification
-from grafana_jsm_sandbox.run_command import SKILL_FILE
-from grafana_jsm_sandbox.skill_template import render
+from grafana_jsm_sandbox.incident_payload import printed
+from grafana_jsm_sandbox.notification import NOTIFICATION_FILENAME, validate_notification
+from grafana_jsm_sandbox.run_command import RENDERED_SKILL, SKILL_FILE
+from grafana_jsm_sandbox.skill_template import materialize, render
 from tests.conftest import FIXTURES, REPOSITORY
 
 GROUP = "checkout-outage"
@@ -53,10 +53,14 @@ the first rule of the group."""
 
 TEMPLATE = (REPOSITORY / "skill" / SKILL_FILE).read_text(encoding="utf-8")
 
-SKILL = render(TEMPLATE, DemoProject(key="SANDBOX", session_id="rehearsal1"))
+PROJECT = DemoProject(key="SANDBOX", session_id="rehearsal1")
+
+SKILL = render(TEMPLATE, PROJECT)
 """The Skill as a Run reads it for a project called SANDBOX in one rehearsal session."""
 
-COMMANDS = [line for line in SKILL.splitlines() if line.startswith("jira-as ")]
+COMMANDS = [
+    line for line in SKILL.splitlines() if line.startswith(("jira-as ", "incident-payload "))
+]
 """Every invocation the Skill spells out, each one line."""
 
 
@@ -204,52 +208,103 @@ def test_group_annotations_and_message_match_the_real_alert_rules(directory, fil
             assert f" - {name} = {expected[name]}\n" in notification["message"]
 
 
-# --- What the Skill does with each of them ---
+# --- What a Run does with each of them ---
 
-MATCH_SEARCH = "jira-as search jql 'project = SANDBOX AND issuetype = Incident AND labels = "
-CREATE = "jira-as issue create -p SANDBOX -t Incident "
-OPENING_COMMENT = "jira-as collaborate comment add <key> -b 'Opened from "
-ADD_LABELS = "jira-as api call editIssue --issue-id-or-key <key> --field 'update.labels=["
+MATCH = "incident-payload match"
+CREATE = "incident-payload create --component '<service>'"
+UPDATE = "incident-payload update --key <key> --labels "
+CLOSE = "incident-payload close --key <key> --labels "
 SERVER_TIME = "jira-as -o json api call getServerInfo"
-ISSUE_GET = "jira-as issue get <key> -o json"
-UPDATE_COMMENT = "jira-as collaborate comment add <key> -b 'Update: "
+COMMENTS = "jira-as collaborate comment list <key> --limit 1 -o json"
 TRANSITIONS = "jira-as lifecycle transitions <key> -o json"
 TRANSITION = "jira-as lifecycle transition <key> --id <id>"
-CLOSING_COMMENT = "jira-as collaborate comment add <key> -b 'Resolved after "
 COMPLETE = "jira-as lifecycle transition <key> --id <id> --resolution Done"
+CHECK = "jira-as issue get <key> --fields status,resolution -o json"
+
+KEY = "SANDBOX-1"
+CREATED = "2026-09-25T14:02:30.000+0000"
+NOW = "2026-09-25T14:06:00.000+0000"
+"""The Incident the first Run would have created, and Jira's clock at a later Run."""
+
+AFTER_CREATE = [GROUP_LABEL, SESSION_LABEL, *(f"fp-{fp}" for fp in fingerprints(FIRING))]
+"""The Match's labels once the first Notification's Run created it."""
 
 
-def test_the_first_firing_finds_no_match_and_creates_the_one_incident():
+def run_on(tmp_path, filename: str, *argv: str) -> list[str]:
+    """What `incident-payload` prints for one canned Notification, in a Run's directory."""
+    runs = tmp_path / "runs"
+    if not (runs / RENDERED_SKILL).exists():
+        materialize(REPOSITORY / "skill", runs / RENDERED_SKILL, PROJECT)
+    working = runs / filename.replace(".json", "")
+    working.mkdir(parents=True, exist_ok=True)
+    (working / NOTIFICATION_FILENAME).write_bytes((FIXTURES / filename).read_bytes())
+    return printed(list(argv), working)
+
+
+def against_match(*step: str, labels: list[str]) -> list[str]:
+    return [
+        *step,
+        "--key",
+        KEY,
+        "--labels",
+        ",".join(labels),
+        "--created",
+        CREATED,
+        "--server-time",
+        NOW,
+    ]
+
+
+def run_lines(lines: list[str]) -> list[str]:
+    return [line for line in lines if not line.startswith("#")]
+
+
+def test_the_first_firing_finds_no_match_and_creates_the_one_incident(tmp_path):
     """Three Alerts, one create, one opening comment: no per-Alert Incident."""
-    search, create, opened = commands_starting(MATCH_SEARCH, CREATE, OPENING_COMMENT)
+    commands_starting(MATCH, CREATE)
+    [search] = run_lines(run_on(tmp_path, FIRING, "match"))
+    dry_run, create, opened = run_lines(
+        run_on(tmp_path, FIRING, "create", "--component", "rolldice")
+    )
 
-    assert f'labels = "{SESSION_LABEL}"' in search and 'labels = "grp-' in search
+    assert f'labels = "{SESSION_LABEL}"' in search and f'labels = "{GROUP_LABEL}"' in search
     assert "fp-" not in search, "the Match is the group's and the session's, not one Alert's"
     assert "[Create]" in table_row("firing", "none")
-    assert f"--labels 'grp-<incident_group>,{SESSION_LABEL},fp-<fingerprint>" in create
-    assert COMMANDS.count(create) == 1
-    assert "<n> firing Alerts in <incident_group>" in opened
+    assert f"--labels '{','.join(AFTER_CREATE)}'" in create
+    assert dry_run == create.replace(" -o json", " --dry-run -o json")
+    assert "-s 'checkout-outage: 3 alerts firing on rolldice'" in create
+    assert "Opened from 3 firing Alerts in checkout-outage: " in opened
 
 
-def test_the_repeat_finds_the_open_incident_and_updates_it_without_creating():
+def test_the_repeat_finds_the_open_incident_and_updates_it_without_creating(tmp_path):
     """Every Alert repeats: no label to add, one comment naming them as repeats, then
     `Open` moves to `Work in progress`, which the first update and only the first does."""
-    commands_starting(MATCH_SEARCH, SERVER_TIME, ISSUE_GET, UPDATE_COMMENT, TRANSITIONS, TRANSITION)
+    commands_starting(MATCH, SERVER_TIME, UPDATE, TRANSITIONS, TRANSITION)
+    lines = run_on(tmp_path, REPEAT, *against_match("update", labels=AFTER_CREATE))
 
+    [comment] = run_lines(lines)
     assert "[Update]" in table_row("firing", "`Open`")
     assert "move it to `Work in progress`" in table_row("firing", "`Open`")
-    assert "Skip this command entirely when no Alert is new" in SKILL
-    [comment] = commands_starting(UPDATE_COMMENT)
-    assert "Repeat: <alertname> value=<current>" in comment
-    assert "New: <alertname> (fp-<fingerprint>) value=<current>" in comment
+    assert lines[0].startswith("# No label to add")
+    assert comment.startswith(f"jira-as collaborate comment add {KEY} -b 'Update: 3 firing. ")
+    assert "New: none. Repeat: rolldice request rate is zero value=0; " in comment
+    assert "Open for 3m30s.'" in comment
 
 
-def test_the_related_alert_adds_its_label_and_a_comment_and_nothing_else():
+def test_the_related_alert_adds_its_label_and_a_comment_and_nothing_else(tmp_path):
     """The Incident is in `Work in progress` by now: add the one new `fp-` label, comment,
     and leave the status alone."""
-    [add_labels] = commands_starting(ADD_LABELS)
+    joined = alerts(RELATED)[3]["fingerprint"]
 
-    assert '{"add":"fp-<fingerprint>"}' in add_labels
+    add, comment = run_lines(
+        run_on(tmp_path, RELATED, *against_match("update", labels=AFTER_CREATE))
+    )
+
+    assert add == (
+        f"jira-as api call editIssue --issue-id-or-key {KEY} "
+        f'--field \'update.labels=[{{"add":"fp-{joined}"}}]\''
+    )
+    assert f"New: rolldice outage is sustained (fp-{joined}) value=" in comment
     assert "[Update]" in table_row("firing", "`Work in progress`")
     assert "nothing else" in table_row("firing", "`Work in progress`")
     assert "Never use\n`jira-as issue update --labels`" in SKILL, (
@@ -258,12 +313,21 @@ def test_the_related_alert_adds_its_label_and_a_comment_and_nothing_else():
     assert not any(command.startswith("jira-as issue update") for command in COMMANDS)
 
 
-def test_all_resolved_closes_the_incident_with_a_resolution():
-    commands_starting(MATCH_SEARCH, CLOSING_COMMENT, COMPLETE)
+def test_all_resolved_closes_the_incident_with_a_resolution_and_checks_it(tmp_path):
+    commands_starting(MATCH, SERVER_TIME, COMMENTS, CLOSE, COMPLETE, CHECK)
+    every = [*AFTER_CREATE, f"fp-{alerts(RELATED)[3]['fingerprint']}"]
+
+    [comment] = run_lines(
+        run_on(tmp_path, RESOLVED, *against_match("close", "--runs", "3", labels=every))
+    )
 
     assert "[Close]" in table_row("resolved", "`Open` or `Work in progress`")
-    assert "--resolution Done" in COMPLETE
     assert COMMANDS.count(COMPLETE) == 1
+    assert comment == (
+        f"jira-as collaborate comment add {KEY} -b 'Resolved after 3m30s: every Alert in "
+        "checkout-outage is resolved (4 Alerts, 4 Runs). Completed automatically from the "
+        "Grafana Notification.'"
+    )
 
 
 def test_a_resolved_notification_with_no_open_incident_is_skipped_and_said_so():
@@ -276,6 +340,6 @@ def test_a_resolved_notification_with_no_open_incident_is_skipped_and_said_so():
 @pytest.mark.parametrize("command", COMMANDS)
 def test_every_command_the_skill_spells_out_is_one_line_the_allow_list_matches(command):
     """One line of plain single quotes, or the permission boundary denies it whole (README)."""
-    assert command.startswith("jira-as ")
+    assert command.startswith(("jira-as ", "incident-payload "))
     assert "$'" not in command and "\\" not in command and "\n" not in command
     assert command.count("'") % 2 == 0, "an unbalanced quote would run on to the next line"

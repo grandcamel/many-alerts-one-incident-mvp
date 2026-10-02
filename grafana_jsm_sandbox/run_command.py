@@ -2,10 +2,11 @@
 
 A Run is headless Claude, started in print mode for exactly one Notification,
 in a mode where any tool call outside the allow list is denied without a prompt
-(ADR 0003). The allow list is jira-as and reading the runs directory, which
-holds each Run's working directory and the Skill the Receiver rendered for this
-start, so a Run can talk to Jira and nothing else, and the denials show up in
-its Transcript where an audience can read them.
+(ADR 0003). The allow list is jira-as, `incident-payload`, which prints the
+jira-as commands a Run would otherwise build by hand, and reading the runs
+directory, which holds each Run's working directory and the Skill the Receiver
+rendered for this start, so a Run can talk to Jira and nothing else, and the
+denials show up in its Transcript where an audience can read them.
 
 The Receiver builds this command line for each Run in ticket 05. Print it to
 run one by hand, naming the runs directory and the demo's project key; the Run
@@ -40,7 +41,12 @@ PERMISSION_MODE = "dontAsk"
 """Anything not on the allow list is denied, without a prompt a Run could hang on."""
 
 JIRA_AS = "Bash(jira-as *)"
-"""Talking to Jira: the one command a Run may execute."""
+"""Talking to Jira: the one command a Run may execute that reaches anything."""
+
+INCIDENT_PAYLOAD = "Bash(incident-payload *)"
+"""Building the Jira payloads: a local command that reads the Notification and the project's
+facts, and prints jira-as lines. It opens no socket, starts no process and writes no file, so
+it adds no reach (ADR 0003's 2026-10-01 amendment)."""
 
 OUTPUT_FORMAT = "stream-json"
 """The Transcript: one Run event per line, rendered into the log as it arrives."""
@@ -72,7 +78,7 @@ def rendered_skill_directory(runs_directory: Path | str) -> Path:
 
 
 def allowed_tools(runs_directory: Path) -> tuple[str, ...]:
-    """Everything a Run may do: talk to Jira, and read under one absolute directory.
+    """Everything a Run may do: talk to Jira, build its payloads, and read under one directory.
 
     A bare `Read` would let a Run read any file its uid can, and the container's
     main process runs as that uid with the real Jira token in its initial
@@ -84,7 +90,7 @@ def allowed_tools(runs_directory: Path) -> tuple[str, ...]:
     The runs directory holds each Run's working directory and so its Notification,
     and the rendered Skill, so one rule covers both.
     """
-    return (JIRA_AS, read_rule(runs_directory))
+    return (JIRA_AS, INCIDENT_PAYLOAD, read_rule(runs_directory))
 
 
 def read_rule(directory: Path) -> str:

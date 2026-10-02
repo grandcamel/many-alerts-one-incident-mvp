@@ -332,11 +332,12 @@ NOWHERE = "http://127.0.0.1:9"
 MODEL_PROMPT = (
     "This Run is doctor's preflight check, not a Notification: there is no "
     f"{NOTIFICATION_FILENAME} and no Incident to handle, so do not follow the skill. Do exactly "
-    "two things and nothing else. First, run `jira-as --version` with Bash. Second, Read "
-    "{skill}. Then reply with one line: what jira-as printed, and the skill's first heading."
+    "three things and nothing else. First, run `jira-as --version` with Bash. Second, run "
+    "`incident-payload --help` with Bash. Third, Read {skill}. Then reply with one line: what "
+    "jira-as printed, and the skill's first heading."
 )
-"""What `--with-model`'s Run is asked: one call each of the two its allow list has, both
-harmless, so a denial of either can only come from rules above the Run's own."""
+"""What `--with-model`'s Run is asked: one call each of the three its allow list has, all
+harmless, so a denial of any can only come from rules above the Run's own."""
 
 HINT_REQUESTS = {
     HINT_CREDITS: CLAUDE_ORG_OWNER,
@@ -1894,6 +1895,14 @@ def judged(
         if call.get("name") == "Bash"
         and str(as_dict(call.get("input")).get("command", "")).lstrip().startswith("jira-as")
     ]
+    payload_calls = [
+        call
+        for call in calls
+        if call.get("name") == "Bash"
+        and str(as_dict(call.get("input")).get("command", ""))
+        .lstrip()
+        .startswith("incident-payload")
+    ]
     skill_reads = [
         call
         for call in calls
@@ -1907,12 +1916,28 @@ def judged(
     def asked_jira(call: dict) -> bool:
         return str(as_dict(call.get("input")).get("command", "")).strip() == "jira-as --version"
 
+    def asked_payload(call: dict) -> bool:
+        return (
+            str(as_dict(call.get("input")).get("command", "")).strip() == "incident-payload --help"
+        )
+
     def asked_read(call: dict) -> bool:
         return str(as_dict(call.get("input")).get("file_path", "")) == str(skill)
 
     lines.append(
         allowed_call_line(
             "jira-as", "Bash(jira-as *)", jira_calls, asked_jira, denied, answers, failure
+        )
+    )
+    lines.append(
+        allowed_call_line(
+            "incident-payload",
+            "Bash(incident-payload *)",
+            payload_calls,
+            asked_payload,
+            denied,
+            answers,
+            failure,
         )
     )
     lines.append(
