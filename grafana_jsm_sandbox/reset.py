@@ -118,6 +118,10 @@ COMPOSE_FAILURES = (subprocess.CalledProcessError, FileNotFoundError, subprocess
 """How `docker compose` fails: a non-zero exit, no `docker` on PATH, or no answer in time."""
 
 
+class _JiraFailure(Exception):
+    """An operational failure raised at the Jira adapter boundary."""
+
+
 @dataclass(frozen=True)
 class Outcome:
     """What the reset did, key by key, so the presenter can read the queue off it."""
@@ -152,9 +156,21 @@ class Outcome:
 
     status_done: str = COMPLETED
 
+    jira_failure: str = ""
+    """The failed Jira phase and diagnostic; the final queue state is unknown."""
+
+    unknown: dict[str, str] = field(default_factory=dict)
+    """Discovered Run keys whose current state could not be confirmed after a Jira failure."""
+
     @property
     def queue_is_empty(self) -> bool:
-        return not (self.left.keys() - set(self.unclosed)) and not self.skipped and not self.stuck
+        return (
+            not self.jira_failure
+            and not self.unknown
+            and not (self.left.keys() - set(self.unclosed))
+            and not self.skipped
+            and not self.stuck
+        )
 
     @property
     def finished(self) -> bool:
@@ -178,69 +194,113 @@ def reset(
     """
     project = DemoProject(project_key) if project is None else project
     compose = run_compose if compose is None else compose
-    # Both searches are read before anything moves: otherwise an Incident this reset has
-    # just left on Completed, its resolution stripped, would turn up in the second search
-    # and be reopened straight away, to no end until the Resolve screen is fixed.
-    open_incidents = search(jira_as, OPEN_INCIDENTS.format(key=project_key))
-    unresolved = search(
-        jira_as,
-        UNRESOLVED_COMPLETED.replace(f'"{COMPLETED}"', json.dumps(project.status_done)).format(
-            key=project_key
-        ),
-    )
+
+    def ask_jira(*arguments: str) -> str:
+        try:
+            return jira_as(*arguments)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as failure:
+            raise _JiraFailure(str(failure)) from failure
+
     closed: list[str] = []
     resolved: list[str] = []
     left: dict[str, str] = {}
     unclosed: list[str] = []
     skipped: list[str] = []
+    stuck: list[str] = []
     runs: list[tuple[str, bool]] = []
-    for issue in open_incidents:
-        if is_a_runs(issue):
-            runs.append((issue["key"], False))
-        else:
-            skipped.append(issue["key"])
-    for issue in unresolved:
-        if is_a_runs(issue):
-            runs.append((issue["key"], True))
-        else:
-            left[issue["key"]] = NOT_A_RUNS
-    for key, reopen in runs:
-        if dry_run:
-            why = road_out(jira_as, key, reopen, project)
-        elif (why := complete(jira_as, key, reopen, project)) is None:
-            why = close(jira_as, key, project)
-            if why is not None:
-                unclosed.append(key)
-        if why is None:
-            (closed if project.status_closed else resolved).append(key)
-        else:
-            left[key] = why
-    stuck = [
-        issue["key"]
-        for issue in search(
-            jira_as,
-            STUCK_INCIDENTS.replace(f'"{COMPLETED}"', json.dumps(project.status_done)).format(
+    unknown: dict[str, str] = {}
+    jira_failure = ""
+    traffic_started = False
+    traffic_failure = ""
+    current_key: str | None = None
+    resolution_confirmed = False
+    phase = "reading open incidents"
+    try:
+        # Both searches finish before anything moves. Otherwise a newly unresolved
+        # Completed issue could be found again and reopened by this same reset.
+        for issue in search(ask_jira, OPEN_INCIDENTS.format(key=project_key)):
+            if is_a_runs(issue):
+                runs.append((issue["key"], False))
+            else:
+                skipped.append(issue["key"])
+        phase = "reading unresolved incidents"
+        unresolved = search(
+            ask_jira,
+            UNRESOLVED_COMPLETED.replace(f'"{COMPLETED}"', json.dumps(project.status_done)).format(
                 key=project_key
             ),
         )
-    ]
-    found = {
-        "closed": closed,
-        "resolved": resolved,
-        "status_done": project.status_done,
-        "left": left,
-        "unclosed": unclosed,
-        "skipped": skipped,
-    }
-    if dry_run:
-        return Outcome(**found, stuck=stuck, dry_run=True)
-    try:
-        compose("start", TRAFFIC_SERVICE)
-    except COMPOSE_FAILURES as failure:
-        # Every Jira change above has already happened; losing the report of them to a
-        # Docker hiccup would leave the presenter guessing at the queue.
-        return Outcome(**found, stuck=stuck, traffic_failure=str(failure))
-    return Outcome(**found, stuck=stuck, traffic_started=True)
+        for issue in unresolved:
+            if is_a_runs(issue):
+                runs.append((issue["key"], True))
+            else:
+                left[issue["key"]] = NOT_A_RUNS
+        for key, reopen in runs:
+            current_key = key
+            resolution_confirmed = False
+            phase = "checking workflow" if dry_run else "resolving incident"
+            if dry_run:
+                why = road_out(ask_jira, key, reopen, project)
+            elif (why := complete(ask_jira, key, reopen, project)) is None:
+                resolution_confirmed = True
+                phase = "closing incident" if project.status_closed else "recording resolved incident"
+                why = close(ask_jira, key, project)
+                if why is not None:
+                    unclosed.append(key)
+            if why is None:
+                (closed if project.status_closed else resolved).append(key)
+            else:
+                left[key] = why
+        current_key = None
+        phase = "reading stuck incidents"
+        stuck = [
+            issue["key"]
+            for issue in search(
+                ask_jira,
+                STUCK_INCIDENTS.replace(f'"{COMPLETED}"', json.dumps(project.status_done)).format(
+                    key=project_key
+                ),
+            )
+        ]
+    except _JiraFailure as failure:
+        jira_failure = f"{phase}: {failure}"
+        if current_key is not None:
+            confirmed = (
+                f"transition to {project.status_done} was acknowledged and a nonempty "
+                "resolution was read back; "
+                if resolution_confirmed
+                else ""
+            )
+            unknown[current_key] = f"{confirmed}current state is unknown after {phase}: {failure}"
+        for key, _ in runs:
+            if key not in closed and key not in resolved and key not in left and key not in unknown:
+                unknown[key] = "not processed after Jira failure; current state is unknown"
+    finally:
+        if not dry_run:
+            original_failure = sys.exception()
+            try:
+                compose("start", TRAFFIC_SERVICE)
+                traffic_started = True
+            except COMPOSE_FAILURES as failure:
+                traffic_failure = str(failure)
+            except Exception:
+                # An unexpected recovery error must not mask the original Jira error.
+                if original_failure is None:
+                    raise
+    return Outcome(
+        closed=closed,
+        resolved=resolved,
+        status_done=project.status_done,
+        left=left,
+        unclosed=unclosed,
+        skipped=skipped,
+        stuck=stuck,
+        dry_run=dry_run,
+        jira_failure=jira_failure,
+        unknown=unknown,
+        traffic_started=traffic_started,
+        traffic_failure=traffic_failure,
+    )
 
 
 def is_a_runs(issue: dict) -> bool:
@@ -294,8 +354,9 @@ def complete(
 def close(jira_as: JiraAs, key: str, project: DemoProject | None = None) -> str | None:
     """Close `key`, which is Completed with a resolution; None when done, else why not.
 
-    The comment goes first, because a Closed Incident may take none. A Close that fails
-    leaves it for a human, with a second comment so its history does not claim the close.
+    The comment goes first, because a Closed Incident may take none. A missing Close
+    transition gets a correction. An adapter failure propagates: Close may have applied,
+    so no further comment or mutation is safe in this reset.
     """
     project = DemoProject(key="") if project is None else project
     if not project.status_closed:
@@ -316,25 +377,17 @@ def close(jira_as: JiraAs, key: str, project: DemoProject | None = None) -> str 
         "-b",
         RESET_COMMENT.replace(COMPLETED, project.status_done),
     )
-    try:
-        if move_to(jira_as, key, project.status_closed):
-            return None
-        why = f"no transition to {project.status_closed} from {project.status_done}"
-    except RuntimeError as failure:
-        why = str(failure)
-    try:
-        jira_as(
-            "collaborate",
-            "comment",
-            "add",
-            key,
-            "-b",
-            CLOSE_FAILED_COMMENT.replace(COMPLETED, project.status_done),
-        )
-    except RuntimeError:
-        # A jira-as that just failed the Close may fail this too; the report still says
-        # the Incident was not closed, which is what a human needs to hear.
-        pass
+    if move_to(jira_as, key, project.status_closed):
+        return None
+    why = f"no transition to {project.status_closed} from {project.status_done}"
+    jira_as(
+        "collaborate",
+        "comment",
+        "add",
+        key,
+        "-b",
+        CLOSE_FAILED_COMMENT.replace(COMPLETED, project.status_done),
+    )
     return NOT_CLOSED.format(why=why)
 
 
@@ -457,6 +510,8 @@ def report(outcome: Outcome) -> None:
         )
     for key, why in outcome.left.items():
         print(f"{key}: {why}")
+    for key, why in outcome.unknown.items():
+        print(f"{key}: {why}")
     for key in outcome.skipped:
         print(f"{key}: open without a {FINGERPRINT_PREFIX} label, so not a Run's; left alone")
     for key in outcome.stuck:
@@ -465,19 +520,26 @@ def report(outcome: Outcome) -> None:
             f"only `jira-as api call deleteIssue --issueIdOrKey {key} --confirm` removes it, "
             "and deleting is permanent: the Incident and its history cannot be restored"
         )
+    if outcome.jira_failure:
+        print(f"Jira reset stopped: {outcome.jira_failure}")
     if outcome.dry_run:
         print(f"{TRAFFIC_SERVICE} would be started")
         print("dry run: nothing was changed")
         if outcome.closed or outcome.resolved:
             print("dry run: a Resolve screen that drops the resolution shows only in a real run")
-        print("queue would be empty" if outcome.queue_is_empty else "queue would NOT be empty")
+        if outcome.jira_failure or outcome.unknown:
+            print("queue state would be unknown")
+        else:
+            print("queue would be empty" if outcome.queue_is_empty else "queue would NOT be empty")
         return
     if outcome.traffic_started:
         print(f"{TRAFFIC_SERVICE} started")
     else:
         print(f"{TRAFFIC_SERVICE} NOT started: {outcome.traffic_failure}")
         print(f"start the traffic with `docker compose start {TRAFFIC_SERVICE}`")
-    if not outcome.queue_is_empty:
+    if outcome.jira_failure or outcome.unknown:
+        print("queue state is unknown")
+    elif not outcome.queue_is_empty:
         print("queue is NOT empty")
     elif outcome.left:
         print(f"queue is empty; {len(outcome.left)} left for a human to close")

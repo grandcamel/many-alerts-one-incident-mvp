@@ -27,6 +27,15 @@ from grafana_jsm_sandbox.investigation_contract import (
     EVIDENCE_SCHEMA_VERSION,
 )
 from grafana_jsm_sandbox.loki_evidence import summarize_logs
+from grafana_jsm_sandbox.prometheus_evidence import (
+    empty_summary as _empty_summary,
+)
+from grafana_jsm_sandbox.prometheus_evidence import (
+    summarize as _summarize,
+)
+from grafana_jsm_sandbox.prometheus_evidence import (
+    summarize_get as _get_summary,
+)
 from grafana_jsm_sandbox.tempo_evidence import (
     normalize_trace_id,
     summarize_search,
@@ -335,99 +344,6 @@ def _request(url: str, token: str) -> tuple[int, bytes]:
     return received
 
 
-def _empty_summary() -> dict:
-    return {"result_type": None, "series_count": 0, "sample_count": 0,
-            "unmodelled_count": 0, "discovery_items": None, "series": []}
-
-
-def _sample(pair):
-    if (
-        not isinstance(pair, list) or len(pair) != 2
-        or isinstance(pair[0], bool) or not isinstance(pair[0], (float, int, Decimal))
-        or not Decimal(str(pair[0])).is_finite() or not isinstance(pair[1], str)
-    ):
-        raise ValueError
-    return pair[0], pair[1]
-
-
-def _series(labels, samples, unmodelled) -> tuple[dict, bool]:
-    if not isinstance(labels, dict) or not all(
-        isinstance(k, str) and isinstance(v, str) for k, v in labels.items()
-    ):
-        raise ValueError
-    latest = minimum = maximum = None
-    all_zero = not unmodelled
-    for pair in samples:
-        timestamp, value = _sample(pair)
-        if latest is None or timestamp >= latest["timestamp"]:
-            latest = {"timestamp": timestamp, "value": value}
-        try:
-            number = Decimal(value)
-        except InvalidOperation:
-            number = Decimal("NaN")
-        if number.is_finite():
-            if minimum is None or number < minimum[0]:
-                minimum = number, value
-            if maximum is None or number > maximum[0]:
-                maximum = number, value
-        if not number.is_finite() or number != 0:
-            all_zero = False
-    return ({"labels": labels, "count": len(samples) + unmodelled, "latest": latest,
-             "min": None if minimum is None else minimum[1],
-             "max": None if maximum is None else maximum[1]}, all_zero)
-
-
-def _summarize(response) -> tuple[dict, str]:
-    if not isinstance(response, dict) or response.get("status") != "success":
-        raise ValueError
-    data = response.get("data")
-    if not isinstance(data, dict) or "result" not in data:
-        raise ValueError
-    kind, result = data.get("resultType"), data["result"]
-    summary = _empty_summary()
-    summary["result_type"] = kind
-    all_zero = True
-    if kind in {"scalar", "string"}:
-        entries = [({}, [result], 0)]
-    elif kind in {"vector", "matrix"} and isinstance(result, list):
-        entries = []
-        for item in result:
-            if not isinstance(item, dict) or "metric" not in item:
-                raise ValueError
-            if kind == "vector":
-                samples = [item["value"]] if "value" in item else []
-                histograms = [item["histogram"]] if "histogram" in item else []
-                if not samples and not histograms:
-                    raise ValueError
-            else:
-                samples, histograms = item.get("values", []), item.get("histograms", [])
-                if not isinstance(samples, list) or not isinstance(histograms, list):
-                    raise ValueError
-                if "values" not in item and "histograms" not in item:
-                    raise ValueError
-            for histogram in histograms:
-                if (
-                    not isinstance(histogram, list) or len(histogram) != 2
-                    or isinstance(histogram[0], bool)
-                    or not isinstance(histogram[0], (int, float, Decimal))
-                    or not Decimal(str(histogram[0])).is_finite()
-                    or not isinstance(histogram[1], dict)
-                ):
-                    raise ValueError
-            entries.append((item["metric"], samples, len(histograms)))
-    else:
-        raise ValueError
-    for labels, samples, unmodelled in entries:
-        series, zero = _series(labels, samples, unmodelled)
-        all_zero = all_zero and zero
-        summary["series"].append(series)
-        summary["sample_count"] += series["count"]
-        summary["unmodelled_count"] += unmodelled
-    summary["series_count"] = len(entries)
-    outcome = "no data" if not summary["sample_count"] else "observed zero" if all_zero else "ok"
-    return summary, outcome
-
-
 def _json(value) -> str:
     """Compact JSON, preserving finite decimal numbers without a float-size cap."""
     if isinstance(value, Decimal):
@@ -443,20 +359,16 @@ def _invalid_json_constant(value: str):
     raise ValueError("invalid JSON number")
 
 
-def _get_summary(response) -> tuple[dict, str]:
-    """Summarize known query data, retaining any other JSON as discovery."""
-    try:
-        return _summarize(response)
-    except (ValueError, TypeError, OverflowError):
-        summary = _empty_summary()
-        data = (
-            response["data"]
-            if isinstance(response, dict) and response.get("status") == "success"
-            and "data" in response else response
-        )
-        items = len(data) if isinstance(data, (dict, list)) else 1
-        summary.update(result_type="discovery", discovery_items=items)
-        return summary, "discovery data" if items else "no data"
+def _serialized_evidence(record) -> str:
+    """Finish representation checks before opening the evidence file."""
+    serialized = (
+        _json(record).replace("\u0085", "\\u0085")
+        .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    )
+    # JSON decoding accepts escaped unpaired surrogates. Strict UTF-8 does not;
+    # checking here prevents creation or partial append of an invalid record.
+    serialized.encode("utf-8")
+    return serialized
 
 
 def _presenter(base, args, proxy, parameters, start, end):
@@ -589,6 +501,15 @@ def main(argv: list[str] | None = None) -> int:
         record["error"] = {"kind": kind, "message": message, "http_status": status}
         return "unavailable: " + message
 
+    def unrepresentable():
+        # Neither raw data nor summaries from an unretained response support a
+        # successful observation. Keep only invocation and retrieval provenance.
+        record.update(status="unavailable", response=None, sample_summary=_empty_summary())
+        for field in ("log_summary", "trace_summary"):
+            if field in record:
+                record[field] = None
+        return unavailable("malformed_response", "response could not be represented")
+
     try:
         status, body = _request(target, token)
     except TimeoutError:
@@ -638,16 +559,19 @@ def main(argv: list[str] | None = None) -> int:
                     else:
                         record["sample_summary"], outcome = _summarize(response)
                     record["status"] = "empty" if outcome == "no data" else "ok"
+            except (RecursionError, InvalidOperation):
+                outcome = unrepresentable()
             except (ValueError, TypeError, OverflowError):
                 outcome = unavailable("malformed_response", "malformed response")
     if record["retrieved_at"] is None:
         record["retrieved_at"] = datetime.now(UTC).isoformat(
             timespec="milliseconds"
         ).replace("+00:00", "Z")
-    serialized = (
-        _json(record).replace("\u0085", "\\u0085")
-        .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
-    )
+    try:
+        serialized = _serialized_evidence(record)
+    except (RecursionError, UnicodeError, ValueError, TypeError, OverflowError):
+        outcome = unrepresentable()
+        serialized = _serialized_evidence(record)
     try:
         with Path(EVIDENCE_FILENAME).open("a", encoding="utf-8") as evidence:
             evidence.write(serialized + "\n")

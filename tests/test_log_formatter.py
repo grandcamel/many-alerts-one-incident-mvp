@@ -9,7 +9,10 @@ rather than to what we imagine it emits.
 
 from __future__ import annotations
 
+import base64
+import copy
 import json
+import secrets
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -34,8 +37,11 @@ from grafana_jsm_sandbox.log_formatter import (
     REPORTED_FAILURE,
     RESULT,
     RUN,
+    TRIM_CHARS,
     format_event,
     format_stream,
+    redact,
+    redact_stderr_chunks,
     run_failure,
 )
 from tests.conftest import FIXTURES, REPOSITORY
@@ -398,6 +404,131 @@ def test_no_line_ever_carries_a_credential(as_event, command, credential):
 )
 def test_redaction_leaves_the_demo_vocabulary_alone(text):
     assert format_event(assistant_event([{"type": "text", "text": text}])) == [f"[claude] {text}"]
+
+
+URLSAFE_SENTINEL = "aB3-cD4_eF5gH6iJ7kL8mN9oP0qR1sT2"
+
+
+@pytest.fixture
+def active_sentinel(monkeypatch):
+    """Exercise the production factory's alphabet, using synthetic bytes only."""
+    from grafana_jsm_sandbox.run_spawner import SENTINEL_BYTES
+
+    raw = base64.urlsafe_b64decode(URLSAFE_SENTINEL)
+    assert len(raw) == SENTINEL_BYTES == 24
+    monkeypatch.setattr(secrets, "token_bytes", lambda size: raw if size == 24 else b"")
+    generated = secrets.token_urlsafe(SENTINEL_BYTES)
+    assert generated == URLSAFE_SENTINEL
+    return generated
+
+
+def assert_no_secret_fragment(rendered, secret):
+    assert not any(secret[at : at + 8] in rendered for at in range(len(secret) - 7))
+
+
+@pytest.mark.parametrize(
+    "as_event",
+    [
+        pytest.param(lambda text: assistant_event([{"type": "text", "text": text}]), id="assistant"),
+        pytest.param(tool_result_event, id="tool-output"),
+        pytest.param(lambda text: tool_result_event(text, is_error=True), id="tool-error"),
+        pytest.param(lambda text: result_event(result="failed: " + text), id="reported-failure"),
+        pytest.param(lambda text: result_event(is_error=True, result=text), id="api-failure"),
+        pytest.param(
+            lambda text: result_event(permission_denials=[
+                {"tool_name": "Bash", "tool_input": {"command": "echo " + text}}
+            ]),
+            id="denied-command",
+        ),
+        pytest.param(lambda text: {"type": text}, id="unknown-type"),
+    ],
+)
+def test_live_projection_redacts_exact_factory_values_without_mutating_events(
+    active_sentinel, as_event
+):
+    event = as_event(active_sentinel)
+    original = copy.deepcopy(event)
+    rendered = "\n".join(format_event(event, active_secrets=(active_sentinel,)))
+
+    assert "<redacted>" in rendered
+    assert_no_secret_fragment(rendered, active_sentinel)
+    assert event == original
+
+
+@pytest.mark.parametrize(("credential_text", "secret"), CREDENTIAL_COMMANDS)
+@pytest.mark.parametrize(
+    "surface", ["output", "error", "api-failure", "reported-failure", "failure-return"]
+)
+def test_supported_credentials_are_redacted_before_character_clipping(credential_text, secret, surface):
+    # Only sixteen characters of the credential fit at the boundary: a regex
+    # recognizing the full value must run before the formatter cuts it short.
+    reason_width = (
+        len("run reported failed: ") if surface == "reported-failure"
+        else len("success: ") if surface not in {"output", "error"} else 0
+    )
+    lead = "evidence " + "." * (
+        TRIM_CHARS - 16 - reason_width - len("evidence ") - credential_text.index(secret)
+    )
+    body = lead + credential_text
+    if surface in {"output", "error"}:
+        rendered = "\n".join(format_event(tool_result_event(body, is_error=surface == "error")))
+    else:
+        event = result_event(
+            result=("failed: " if surface == "reported-failure" else "") + body,
+            is_error=surface != "reported-failure",
+        )
+        rendered = (
+            run_failure(event) if surface == "failure-return" else "\n".join(format_event(event))
+        )
+
+    assert rendered
+    assert_no_secret_fragment(rendered, secret)
+    assert "<redacted>" in rendered
+
+
+@pytest.mark.parametrize("shape", ["unknown", "malformed"])
+def test_fallback_diagnostics_always_redact_embedded_credentials(shape, monkeypatch):
+    from grafana_jsm_sandbox import log_formatter
+
+    kind = "sk-ant-api03-abcdefghijklmnop"
+    if shape == "malformed":
+        def cannot_render(event, **kwargs):
+            raise ValueError("malformed event")
+
+        monkeypatch.setitem(log_formatter._RENDERERS, kind, cannot_render)
+    rendered = "\n".join(format_event({"type": kind}))
+
+    assert rendered.startswith(DIAGNOSTIC)
+    assert_no_secret_fragment(rendered, kind)
+    assert "<redacted>" in rendered
+
+
+@pytest.mark.parametrize("as_event", [
+    lambda body: assistant_event([{"type": "text", "text": body}]),
+    tool_result_event,
+    lambda body: result_event(is_error=True, result=body),
+    lambda body: {"type": "system", "subtype": "permission_denied", "message": body},
+])
+def test_credential_recognition_precedes_line_and_sentence_clipping(as_event):
+    secret = "c2VudGluZWw6bm90LWZvci1hLXNjcmVlbg=="
+    rendered = "\n".join(format_event(as_event("Authorization: Basic\n" + secret)))
+    assert_no_secret_fragment(rendered, secret)
+    assert "<redacted>" in rendered
+
+
+def test_exact_context_preserves_normal_identifiers_and_stream_input(active_sentinel):
+    text = (
+        "fp-a1b2c3d4e5f60718 550e8400-e29b-41d4-a716-446655440000 "
+        "https://site.atlassian.net/rest/api/3/issue/10001 OPS-41 "
+        "2026-09-15T16:40:12Z"
+    )
+    event = assistant_event([{"type": "text", "text": text + " " + active_sentinel}])
+    raw = json.dumps(event)
+    assert list(format_stream([raw], active_secrets=(active_sentinel,))) == [
+        f"[claude] {text} <redacted>"
+    ]
+    assert json.loads(raw) == event
+    assert redact(text, active_secrets=(active_sentinel, "")) == text
 
 
 def test_stream_renders_a_recorded_transcript_end_to_end():
@@ -885,3 +1016,58 @@ def test_a_rate_limit_event_without_its_details_still_names_its_status():
 def test_a_failure_prefix_is_read_only_from_a_success_result(subtype):
     event = result_event(subtype=subtype, result="failed: no resolution")
     assert run_failure(event) is None
+
+
+@pytest.mark.parametrize("width", [1, 7, 8192])
+@pytest.mark.parametrize("body", [
+    "aB3-cD4_eF5gH6iJ7kL8mN9oP0qR1sT2",
+    "safe " + "aB3-cD4_eF5gH6iJ7kL8mN9oP0qR1sT2 " * 500 + " final",
+    "x" * 8180 + "aB3-cD4_eF5gH6iJ7kL8mN9oP0qR1sT2" + " \t\n" * 5000,
+    "prefix abcab ab abcab suffix",
+])
+def test_stderr_stream_redacts_exact_context_across_read_boundaries(width, body):
+    secrets = (URLSAFE_SENTINEL, "abcab", "ab", "")
+    chunks = (body[at:at + width] for at in range(0, len(body), width))
+    assert "".join(redact_stderr_chunks(chunks, active_secrets=secrets)) == redact(
+        body, active_secrets=secrets
+    )
+
+
+@pytest.mark.parametrize("width", [1, 7, 8192])
+@pytest.mark.parametrize("shape", [
+    "Authorization: Basic {value}", "Bearer {value}",
+    "curl -u user@example.invalid:{value}", "--api-key={value}",
+    "JIRA_API_TOKEN={value}", "password {value}", "sk-ant-api03-{value}",
+])
+def test_stderr_shape_values_can_continue_beyond_the_recognition_window(width, shape):
+    value = "0123456789abcdef" * 2000
+    body = "safe start " + shape.format(value=value) + " final diagnostic"
+    chunks = (body[at:at + width] for at in range(0, len(body), width))
+    output = "".join(redact_stderr_chunks(chunks))
+    short_body = "safe start " + shape.format(value="0123456789abcdef" * 4) + " final diagnostic"
+    assert output == redact(short_body)
+    assert "<redacted>" in output
+    assert "0123456789abcdef" not in output
+
+
+@pytest.mark.parametrize("text", ["Authorization: opaque-value", "Bearer opaque-value", "sk-ant-api03-abcdefgh"])
+def test_stderr_stream_cuts_preserve_the_actual_word_boundary(text):
+    body = "x" * 8192 + text + " " * (16384 - len(text))
+    output = "".join(redact_stderr_chunks(body[at:at + 8192] for at in range(0, len(body), 8192)))
+    assert output == redact(body)
+
+
+@pytest.mark.parametrize(("shape", "expected"), [("Bearer {value}", "Bearer <redacted>"),
+                                                     ("sk-ant-{value}", "<redacted>")])
+def test_stderr_continuation_uses_the_recognizers_unicode_case_alphabet(shape, expected):
+    body = shape.format(value="a" * 32000 + "Kİıſ" * 4) + " final"
+    output = "".join(redact_stderr_chunks(body[at:at + 8192] for at in range(0, len(body), 8192)))
+    assert output == expected + " final"
+
+
+def test_stderr_opaque_candidate_ambiguity_is_conservatively_redacted():
+    # The late Unicode word character invalidates whole-regex trailing \b.
+    # A bounded fallback has already hidden the recognized long ASCII value.
+    body = "a1" * 32000 + "K final"
+    output = "".join(redact_stderr_chunks(body[at:at + 8192] for at in range(0, len(body), 8192)))
+    assert output == "<redacted>K final"

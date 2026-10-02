@@ -441,6 +441,107 @@ def test_evidence_write_failure_has_five_lines_and_exit_three(grafana, capsys, t
     assert lines[4].startswith("evidence: unavailable | presenter: " + PRESENTER)
 
 
+@pytest.mark.parametrize("body,arguments", [
+    (b'{"status":"success","data":["secret\\ud800"]}', ["get", "--path", "/api/v1/labels"]),
+    (b'{"status":"success","data":{"secret\\udfff":"value"}}', ["get", "--path", "/api/v1/series"]),
+    (b'{"status":"success","data":{"nested":[{"value":"secret\\ud800"}]}}', ["get", "--path", "/future"]),
+    (b'{"status":"success","data":{"resultType":"string","result":[1000,"secret\\udfff"]}}', ["instant", "--query", "up"]),
+    (b'{"status":"error","error":"secret\\ud800"}', ["instant", "--query", "up"]),
+    (b'{"status":"success","data":{"secret\\udfff":true}}', ["instant", "--query", "up"]),
+    (b'{"status":"success","data":{"resultType":"streams","result":[{"stream":{},"values":[["1000000000000","secret\\ud800"]]}]}}', ["logs", "--query", "{}"]),
+    (b'{"traces":[{"traceID":"abc","rootServiceName":"secret\\ud800"}]}', ["traces", "--query", "{}"]),
+    (b'{"trace":{"resourceSpans":[]},"future":"secret\\ud800"}', ["trace", "--id", "abc"]),
+    (b'{"status":"success","data":' + b'[' * 750 + b'"secret"' + b']' * 750 + b'}', ["get", "--path", "/future"]),
+    (b'{"status":"success","data":' + b'[' * 10000 + b'"secret"' + b']' * 10000 + b'}', ["get", "--path", "/future"]),
+    (b'{"status":"success","data":{"secret":1e999999999999999999999}}', ["get", "--path", "/future"]),
+    (b'{"status":"success","data":{"secret":1e-999999999999999999999}}', ["get", "--path", "/future"]),
+], ids=["high-surrogate", "low-surrogate-key", "nested-surrogate", "sample-surrogate",
+        "error-body-surrogate", "malformed-surrogate", "log-surrogate", "search-surrogate",
+        "trace-surrogate", "serializer-recursion", "decoder-recursion",
+        "positive-exponent", "negative-exponent"])
+@pytest.mark.parametrize("has_previous", [False, True], ids=["new-file", "append"])
+def test_unrepresentable_response_is_bounded_cli_failure(
+    grafana, monkeypatch, capsys, tmp_path, body, arguments, has_previous
+):
+    """Real HTTP and a fresh CLI process must not emit success or partial JSONL."""
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parent.parent))
+    monkeypatch.setenv("PYTHONIOENCODING", "utf-8:strict")
+    if body.count(b"[") == 750:
+        # Isolate a successful decode from the recursive serializer's failure.
+        assert json.loads(body)["status"] == "success"
+    if b"999999999999999999999" in body:
+        # The syntax is valid JSON; Decimal cannot represent this exponent.
+        assert json.loads(body, parse_float=str)["status"] == "success"
+    evidence_path = tmp_path / "grafana-evidence.jsonl"
+    # A retained earlier observation must survive a representation failure intact.
+    previous = b""
+    previous_record = None
+    if has_previous:
+        answer(grafana, query_result("vector", [{"metric": {}, "value": [1000, "2"]}]))
+        assert grafana_query.main(["instant", "--query", "up", "--time", "1000"]) == 0
+        _, previous_record = record(capsys, tmp_path)
+        previous = evidence_path.read_bytes()
+    grafana.responses.append((200, body, 0))
+    result = subprocess.run(
+        [sys.executable, "-m", "grafana_jsm_sandbox.grafana_query", *arguments],
+        cwd=tmp_path, capture_output=True, text=True, timeout=15, check=False,
+    )
+    assert result.returncode == 1
+    assert result.stderr == ""
+    lines = result.stdout.splitlines()
+    assert len(lines) == 6
+    assert all(len(line) <= 200 for line in lines[:5])
+    assert lines[0] == "grafana-query: unavailable: response could not be represented"
+    assert "secret" not in result.stdout
+    assert TOKEN not in result.stdout
+    assert "\\ud800" not in result.stdout and "\\udfff" not in result.stdout
+    assert "\ufffd" not in result.stdout
+    saved = evidence_path.read_bytes()
+    assert saved == previous + (lines[5] + "\n").encode("utf-8")
+    evidence = json.loads(lines[5])
+    assert evidence["status"] == "unavailable"
+    assert evidence["response"] is None
+    assert evidence["error"] == {
+        "kind": "malformed_response", "message": "response could not be represented",
+        "http_status": None,
+    }
+    assert evidence["sample_summary"] == {
+        "result_type": None, "series_count": 0, "sample_count": 0,
+        "unmodelled_count": 0, "discovery_items": None, "series": [],
+    }
+    if arguments[0] == "logs":
+        assert evidence["log_summary"] is None
+    if arguments[0] in {"traces", "trace"}:
+        assert evidence["trace_summary"] is None
+    assert evidence["retrieved_at"].endswith("Z")
+    assert evidence["presenter_link"].startswith(PRESENTER)
+    retained, unreadable = incident_payload.read_evidence(evidence_path)
+    assert unreadable is None
+    assert retained == ([previous_record] if has_previous else []) + [evidence]
+    comment, _ = evidence_comment(tmp_path)
+    assert "response could not be represented" in comment
+    assert "evidence file unreadable" not in comment
+    if has_previous:
+        assert "latest 2 at 1970-01-01T00:16:40.000Z" in comment
+
+
+def test_serializable_discovery_preserves_unicode_and_decimal_values(grafana, capsys, tmp_path):
+    body = (
+        b'{"status":"success","data":{"unicode":"\\ud83d\\ude00\\u65e5",'
+        b'"tiny":1e-400,"large":1e400,"nested":' + b'[' * 100 + b'42' + b']' * 100 + b'}}'
+    )
+    grafana.responses.append((200, body, 0))
+    assert grafana_query.main(["get", "--path", "/future"]) == 0
+    lines, evidence = record(capsys, tmp_path)
+    saved_response = json.loads(lines[5], parse_float=Decimal)["response"]
+    assert saved_response == json.loads(body, parse_float=Decimal)
+    assert saved_response["data"]["unicode"] == "😀日"
+    assert evidence["status"] == "ok"
+    retained, unreadable = incident_payload.read_evidence(tmp_path / "grafana-evidence.jsonl")
+    assert unreadable is None
+    assert retained[0]["response"] == saved_response
+
+
 @pytest.fixture
 def configured(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
@@ -465,6 +566,39 @@ def test_cli_sample_values_reach_comment_without_float_underflow(
         assert f"latest {value} at 1970-01-01T00:16:40.500Z" in body
     if value == "1e-400":
         assert "min 1e-400, max 1e-400" in body
+
+
+def test_unrepresentable_metric_timestamp_is_unavailable_in_query_and_comment(
+    grafana, capsys, tmp_path
+):
+    answer(grafana, query_result("scalar", [253402300800, "2"]))
+
+    assert grafana_query.main(["instant", "--query=up", "--time=1000"]) == 1
+    lines, evidence = record(capsys, tmp_path)
+    body, _ = evidence_comment(tmp_path)
+
+    assert lines[0] == "grafana-query: unavailable: malformed response"
+    assert evidence["response"]["data"]["result"] == [253402300800, "2"]
+    assert body.endswith("Evidence: unavailable: malformed response")
+
+
+@pytest.mark.parametrize("kind,result,expected", [
+    ("matrix", [{"metric": {}, "values": [[-62135596801, "2"], [1000, "3"]]}],
+     "latest 3 at 1970-01-01T00:16:40.000Z; min 2, max 3"),
+    ("vector", [{"metric": {}, "histogram": [253402300800, {"count": "1"}]}],
+     "unmodelled samples=1"),
+])
+def test_undisplayed_metric_timestamps_keep_their_existing_finite_only_contract(
+    grafana, capsys, tmp_path, kind, result, expected
+):
+    answer(grafana, query_result(kind, result))
+
+    assert grafana_query.main(["range", "--query=up", "--start=1000", "--end=1001"]) == 0
+    _, evidence = record(capsys, tmp_path)
+    body, _ = evidence_comment(tmp_path)
+
+    assert evidence["response"]["data"]["result"] == result
+    assert expected in body and "Evidence unavailable" not in body
 
 
 def test_extreme_step_query_error_reaches_unavailable_comment(

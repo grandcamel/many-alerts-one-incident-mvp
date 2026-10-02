@@ -41,9 +41,12 @@ Three to four rules on the existing demo app, all labelled `incident_group=check
 
 ## Proof
 
-`verify --mvp`, in replay and live modes, stops traffic and waits. It asserts:
+`verify --mvp --replay` posts four grouped, canned Notifications and watches their Jira
+effects while leaving traffic untouched. `verify --mvp --live` stops traffic, watches the
+real grouped Notifications and restores traffic. Both modes use paid Runs and write Jira
+Incidents. They assert:
 1. exactly one Incident with `grp-` and `ses-` exists, carrying at least two `fp-` labels;
 2. a later repeat produces a comment, not a new Incident;
 3. the sustained-outage alert adds its `fp-` label and a comment;
-4. after traffic restarts, the Incident is Completed;
+4. the closing Resolved Notification completes the Incident (after traffic restarts in live mode);
 5. at no point do two open Incidents share the group and session labels.

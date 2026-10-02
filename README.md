@@ -938,7 +938,9 @@ python3 -m grafana_jsm_sandbox.reset
 ```
 
 It runs on the laptop against the project and credential in `.env`, prints what it did per key,
-and exits non-zero if anything a human has to finish is still open or the traffic did not start.
+and exits non-zero if the queue state could not be confirmed, anything is left for a human,
+or the traffic did not start. A Jira failure keeps confirmed results, stops further Jira work
+and retries no writes; traffic is still attempted and the report ends `queue state is unknown`.
 It never cancels and never deletes, and it never closes an Incident that reached Completed
 without a resolution, which would strand it in the queue; the next reset reopens it and takes it
 out again. `--dry-run` lists what it would change and changes nothing.

@@ -1307,7 +1307,11 @@ def rewritten(text: str, changes: list[Change]) -> str:
         if name in values:
             lines[number] = assignment(line, name, values[name])
             seen.add(name)
-    appended = [f"{name}={value}{newline}" for name, value in values.items() if name not in seen]
+    appended = [
+        f"{name}={dotenv_value(name, value)}{newline}"
+        for name, value in values.items()
+        if name not in seen
+    ]
     if not appended:
         return "".join(lines)
     if lines and not lines[-1].endswith(("\n", "\r")):
@@ -1344,7 +1348,39 @@ def assignment(line: str, name: str, value: str) -> str:
     rest = body.lstrip()
     export = "export " if rest.startswith("export ") else ""
     raw = rest.partition("=")[2].strip()
-    return f"{indent}{export}{name}={value}{inline_comment(raw)}{ending}"
+    return f"{indent}{export}{name}={dotenv_value(name, value)}{inline_comment(raw)}{ending}"
+
+
+def dotenv_value(name: str, value: str) -> str:
+    """Encode a discovered fact literally for both the local reader and Compose.
+
+    Ordinary values stay bare. Double quotes protect quotes and inline hashes;
+    escaped backslashes stay literal rather than becoming Compose escape sequences.
+    Dollars need single quotes to prevent Compose interpolation. The local reader
+    cannot handle escaped apostrophes, and an odd trailing backslash would escape
+    the closing quote in Compose, so those dollar combinations are refused.
+    Control characters and padded facts are refused rather than normalized: the
+    one-line reader and project-fact consumers cannot preserve their spelling.
+    """
+    if any(ord(char) < 32 or ord(char) == 127 or char in "\x85\u2028\u2029" for char in value):
+        raise ConfigurationError(f"{name} contains unsupported control or line-breaking characters")
+    if value != value.strip():
+        raise ConfigurationError(f"{name} contains unsupported leading or trailing whitespace")
+    if "$" in value:
+        if "'" in value:
+            raise ConfigurationError(
+                f"{name} combines dollars and apostrophes; cannot encode literally"
+            )
+        trailing_backslashes = len(value) - len(value.rstrip("\\"))
+        if trailing_backslashes % 2:
+            raise ConfigurationError(
+                f"{name} combines dollars and an odd trailing backslash; cannot encode literally"
+            )
+        return f"'{value}'"
+    if not any(quote in value for quote in ("'", '"')) and " #" not in value:
+        return value
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def inline_comment(raw: str) -> str:
@@ -1443,7 +1479,12 @@ def main(
         print(check.line)
     changes = planned(values, found.facts)
     if arguments.write and changes:
-        write(env_file, changes)
+        try:
+            write(env_file, changes)
+        except ConfigurationError as failure:
+            report(changes, written=False, unchecked=found.unchecked)
+            print(f"NOT READY: .env: {failure}")
+            return 1
     report(changes, written=arguments.write, unchecked=found.unchecked)
     if found.blocker is None:
         print("READY")

@@ -442,7 +442,8 @@ or the engineer declined it.
 python3 -m grafana_jsm_sandbox.reset --dry-run
 ```
 
-Show its lines as printed.
+Show its lines as printed. A dry run ending `queue state would be unknown` is a blocker,
+even if it names no key.
 
 When it names a key, ask whether to complete and close the Incidents it names and start the
 traffic. On yes:
@@ -466,7 +467,7 @@ A line offering `deleteIssue` is the engineer's decision: deletion is permanent,
 it to them.
 
 Done when `reset` printed `traffic started` and ended `queue is empty`, or, when the dry run
-named nothing, `doctor --only stack` ends `READY` with no `traffic` WARN.
+named nothing and ended `queue would be empty`, `doctor --only stack` ends `READY` with no `traffic` WARN.
 
 ## 10. Hand-off
 

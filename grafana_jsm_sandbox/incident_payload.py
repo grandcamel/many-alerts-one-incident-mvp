@@ -78,6 +78,7 @@ from grafana_jsm_sandbox.investigation_contract import (
 )
 from grafana_jsm_sandbox.loki_evidence import summarize_logs
 from grafana_jsm_sandbox.notification import NOTIFICATION_FILENAME
+from grafana_jsm_sandbox.prometheus_evidence import empty_summary, summarize, summarize_get
 from grafana_jsm_sandbox.run_command import RENDERED_SKILL
 from grafana_jsm_sandbox.tempo_evidence import normalize_trace_id, summarize_search, summarize_trace
 
@@ -703,6 +704,17 @@ def _evidence_record(record: object) -> dict:
         if series["latest"] is not None:
             fields(series["latest"], {"timestamp": number, "value": string})
             datetime.fromtimestamp(float(series["latest"]["timestamp"]), UTC)
+    if record["command"] in ("instant", "range", "get"):
+        if record["status"] == "unavailable":
+            if summary != empty_summary():
+                raise ValueError("failed metrics have a summary")
+        else:
+            summarize_response = summarize_get if record["command"] == "get" else summarize
+            expected, outcome = summarize_response(record["response"])
+            if summary != expected:
+                raise ValueError("metric summary differs from response")
+            if record["status"] != ("empty" if outcome == "no data" else "ok"):
+                raise ValueError("metric status differs from returned evidence")
     if record["command"] == "logs":
         fields(record, {"log_summary": (dict, type(None))})
         parameters = dict(record["parameters"])
@@ -829,7 +841,7 @@ def read_evidence(path: Path) -> tuple[list[dict], str | None]:
         return [], "no query evidence recorded"
     try:
         records = [_evidence_record(json.loads(line, parse_float=Decimal)) for line in text.splitlines()]
-    except (ValueError, TypeError, OverflowError, OSError):
+    except (ValueError, TypeError, OverflowError, OSError, RecursionError, InvalidOperation):
         return [], "evidence file unreadable"
     return records, None
 
@@ -871,7 +883,7 @@ def evidence_result(record: dict) -> str:
     if summary["result_type"] == "discovery":
         return f"discovery: {summary['discovery_items']} items"
     series = summary["series"]
-    if _observed_zero(record):
+    if summarize(record["response"])[1] == "observed zero":
         return "observed zero"
     words = f"{summary['series_count']} series, {summary['sample_count']} samples"
     if series:
@@ -888,45 +900,6 @@ def evidence_result(record: dict) -> str:
     if summary["unmodelled_count"]:
         words += f"; unmodelled samples={summary['unmodelled_count']}"
     return words
-
-
-def _observed_zero(record: dict) -> bool:
-    """Check actual samples: finite zero bounds alone can hide a nonfinite sample."""
-    summary = record["sample_summary"]
-    if summary["sample_count"] == 0 or summary["unmodelled_count"]:
-        return False
-    response = record["response"]
-    data = response.get("data") if isinstance(response, dict) else None
-    if not isinstance(data, dict):
-        return False
-    result, kind = data.get("result"), data.get("resultType")
-    samples = []
-    if kind in ("scalar", "string"):
-        samples = [result]
-    elif kind in ("vector", "matrix") and isinstance(result, list):
-        for series in result:
-            if not isinstance(series, dict):
-                return False
-            if kind == "vector":
-                samples.append(series.get("value"))
-            else:
-                values = series.get("values", [])
-                if not isinstance(values, list):
-                    return False
-                samples.extend(values)
-    if len(samples) != summary["sample_count"]:
-        return False
-    for sample in samples:
-        if (not isinstance(sample, list) or len(sample) != 2
-                or not isinstance(sample[1], str)):
-            return False
-        try:
-            number = Decimal(sample[1])
-            if not number.is_finite() or number != 0:
-                return False
-        except InvalidOperation:
-            return False
-    return bool(samples)
 
 
 _UNICODE_ESCAPE_NOTATION = re.compile(r"\\u[0-9a-fA-F]{4}")

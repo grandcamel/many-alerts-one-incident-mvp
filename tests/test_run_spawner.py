@@ -8,19 +8,24 @@ output turned into in the log, and whether a stuck one can be killed.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import os
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
 from grafana_jsm_sandbox import run_spawner
+from grafana_jsm_sandbox.incident_payload import FACTS_FILE, Facts
 from grafana_jsm_sandbox.log_formatter import HINT_CREDITS
 from grafana_jsm_sandbox.notification import NOTIFICATION_FILENAME
 from grafana_jsm_sandbox.receiver import TRANSCRIPT_FILENAME, Receiver, Run
-from grafana_jsm_sandbox.run_command import read_rule
+from grafana_jsm_sandbox.run_command import RENDERED_SKILL, read_rule
 from grafana_jsm_sandbox.run_spawner import (
     ALLOWED_PROJECTS_VARIABLE,
     API_KEY_VARIABLE,
@@ -133,11 +138,27 @@ time.sleep(30)
 the same Transcript pipe. Killing only the Run leaves the Receiver reading that pipe."""
 
 
+def group_notification() -> dict:
+    """The chapter-one Alert with the group required by a real MVP Run."""
+    notification = firing_notification()
+    notification["groupLabels"]["incident_group"] = "checkout-outage"
+    return notification
+
+
+def prepare_facts(directory: Path) -> None:
+    rendered = directory / RENDERED_SKILL
+    rendered.mkdir(parents=True, exist_ok=True)
+    (rendered / FACTS_FILE).write_text(
+        Facts(PROJECT_KEY, "ses-demo", None, None, None, "Completed").as_json()
+    )
+
+
 def a_run(directory: Path, run_id: str = "20260915T164012-abc123") -> Run:
     """A Run the way the Receiver prepares one: its own directory, Notification written."""
     working_directory = directory / run_id
     working_directory.mkdir(parents=True)
-    (working_directory / NOTIFICATION_FILENAME).write_text(json.dumps(firing_notification()))
+    (working_directory / NOTIFICATION_FILENAME).write_text(json.dumps(group_notification()))
+    prepare_facts(directory)
     return Run(run_id, working_directory)
 
 
@@ -449,6 +470,57 @@ def test_a_failed_runs_stderr_is_redacted_like_every_other_log_line(forwarder, r
     assert "<redacted>" in caplog.text
 
 
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "",
+        " \t\n\u2003" * 10_000,
+        " \t\n\u2003" * 10_000 + "last diagnostic",
+        "last diagnostic" + " \t\n\u2003" * 10_000,
+        "first diagnostic" + " \t\n\u2003" * 10_000 + "last diagnostic",
+        "日本😀e\u0301" * 1_000 + "\r\n",
+        "\x1c\x1d\x1e\x1f" + "diagnostic\u200b" + "\u3000\x85",
+        "x" * 10_000 + "\n",
+    ],
+    ids=[
+        "empty", "all-whitespace", "leading-whitespace", "trailing-whitespace",
+        "interior-whitespace", "unicode", "strip-characters", "over-limit",
+    ],
+)
+def test_failed_run_logs_the_exact_stripped_stderr_tail(run, caplog, stderr):
+    caplog.set_level(logging.INFO)
+    command = _program("import sys", f"sys.stderr.write({stderr!r})", "sys.exit(3)")
+
+    outcome = spawner_for(command, InvestigationForwarder())(run)
+
+    assert (outcome.exit_status, outcome.failure) == (3, "exit status 3")
+    diagnostics = [
+        record.getMessage() for record in caplog.records if "wrote to stderr:" in record.getMessage()
+    ]
+    tail = stderr.strip()[-2000:]
+    assert diagnostics == ([f"run {run.run_id} wrote to stderr: {tail}"] if tail else [])
+
+
+def test_a_noisy_child_drains_stderr_and_preserves_the_transcript(run, caplog):
+    caplog.set_level(logging.INFO)
+    noisy = """\
+import sys
+for _ in range(512):
+    sys.stderr.write("x" * 8192)
+sys.stderr.write("\\nfinal diagnostic" + " \\t\\n" * 10_000)
+"""
+
+    outcome = spawner_for(
+        _program(noisy, EMIT_A_TRANSCRIPT, "sys.exit(3)"), InvestigationForwarder(), timeout=10
+    )(run)
+
+    assert (outcome.exit_status, outcome.failure) == (3, "exit status 3")
+    tail = ("x" * 2000 + "\nfinal diagnostic").strip()[-2000:]
+    assert f"run {run.run_id} wrote to stderr: {tail}" in caplog.text
+    assert "[result] success in 1.2s" in caplog.text
+    assert json.loads(run.transcript_path.read_text().splitlines()[-1])["type"] == "result"
+
+
 def test_a_successful_runs_stderr_stays_out_of_the_log(forwarder, run, caplog):
     caplog.set_level(logging.INFO)
     noisy = """\
@@ -486,14 +558,15 @@ def test_the_timeout_also_ends_what_the_run_started(forwarder, run, caplog):
 
 def test_a_timed_out_run_does_not_stall_the_queue(forwarder, tmp_path, caplog):
     caplog.set_level(logging.INFO)
+    prepare_facts(tmp_path / "runs")
     receiver = Receiver(
         spawn_run=spawner_for(_program(HANG), forwarder, timeout=0.5),
         runs_directory=tmp_path / "runs",
     )
     receiver.start()
     try:
-        post_notification(receiver, firing_notification())
-        post_notification(receiver, firing_notification())
+        post_notification(receiver, group_notification())
+        post_notification(receiver, group_notification())
         log = wait_for_log(caplog, "finished with exit status", count=2, timeout=15)
     finally:
         receiver.stop()
@@ -587,13 +660,14 @@ def test_a_failed_result_is_the_reason_even_when_the_exit_status_is_not_0(forwar
 
 def test_the_receiver_logs_a_refused_run_as_failed(forwarder, tmp_path, caplog):
     caplog.set_level(logging.INFO)
+    prepare_facts(tmp_path / "runs")
     receiver = Receiver(
         spawn_run=spawner_for(_program(replaying(REFUSED_TRANSCRIPT)), forwarder),
         runs_directory=tmp_path / "runs",
     )
     receiver.start()
     try:
-        post_notification(receiver, firing_notification())
+        post_notification(receiver, group_notification())
         log = wait_for_log(caplog, "FAILED: api_error", timeout=15)
     finally:
         receiver.stop()
@@ -638,6 +712,133 @@ def test_the_log_is_redacted_though_the_transcript_on_disk_is_raw(forwarder, run
     assert "hunter2-is-not-a-real-password-at-all" not in caplog.text
     assert "<redacted>" in caplog.text
     assert run.transcript_path.read_text(encoding="utf-8") == A_RAW_LINE + "\n"
+
+
+@pytest.mark.parametrize("credential_variable", [API_KEY_VARIABLE, OAUTH_TOKEN_VARIABLE])
+def test_live_projection_hides_actual_secrets_and_preserves_raw_transcript(
+    forwarder, run, caplog, monkeypatch, credential_variable
+):
+    sentinel = "aB3-cD4_eF5gH6iJ7kL8mN9oP0qR1sT2"
+    raw = base64.urlsafe_b64decode(sentinel)
+    assert len(raw) == run_spawner.SENTINEL_BYTES == 24
+    monkeypatch.setattr(run_spawner.secrets, "token_bytes", lambda size: raw)
+    # No recognized prefix or assignment: exact known context must do the work.
+    model_secret = "mY4-aC6_gH8jK0lP2rS5uV7wX9zB1dE3"
+    caplog.set_level(logging.INFO)
+    program = f'''\
+import json, os, sys
+sentinel = os.environ["JIRA_API_TOKEN"]
+credential = os.environ[{credential_variable!r}]
+for event in [
+    {{"type": "assistant", "message": {{"content": [{{"type": "text", "text": sentinel + " " + credential}}]}}}},
+    {{"type": "user", "message": {{"content": [{{"type": "tool_result", "content": "evidence " + "." * 175 + sentinel}}]}}}},
+    {{"type": "result", "subtype": "success", "result": "failed: " + sentinel + " " + credential}},
+]:
+    print(json.dumps(event), flush=True)
+print(sentinel + " " + credential, file=sys.stderr)
+sys.exit(1)
+'''
+    outcome = spawner_for(
+        _program(program), forwarder,
+        model_credential=ModelCredential(credential_variable, model_secret),
+    )(run)
+
+    assert outcome.exit_status == 1
+    assert outcome.failure == "run reported failed: <redacted> <redacted>"
+    for secret in (sentinel, model_secret):
+        assert not any(secret[at : at + 8] in caplog.text for at in range(len(secret) - 7))
+    assert "[claude] <redacted> <redacted>" in caplog.text
+    assert "wrote to stderr: <redacted> <redacted>" in caplog.text
+    recorded = [json.loads(line) for line in run.transcript_path.read_text().splitlines()]
+    assert recorded[0]["message"]["content"][0]["text"] == sentinel + " " + model_secret
+    assert recorded[1]["message"]["content"][0]["content"].endswith(sentinel)
+    assert recorded[2]["result"] == "failed: " + sentinel + " " + model_secret
+
+
+@pytest.mark.parametrize("variable", ["JIRA_API_TOKEN", OAUTH_TOKEN_VARIABLE])
+def test_failed_stderr_redacts_active_secret_before_tail_clipping(
+    forwarder, run, caplog, monkeypatch, variable
+):
+    sentinel = "aB3-cD4_eF5gH6iJ7kL8mN9oP0qR1sT2"
+    model_secret = "mY4-aC6_gH8jK0lP2rS5uV7wX9zB1dE3"
+    monkeypatch.setattr(run_spawner.secrets, "token_urlsafe", lambda size: sentinel)
+    secret = sentinel if variable == "JIRA_API_TOKEN" else model_secret
+    program = f'''\
+import os, sys
+sys.stderr.write("complaint " + os.environ[{variable!r}] + "." * {run_spawner.STDERR_TAIL - 16})
+sys.exit(1)
+'''
+
+    outcome = spawner_for(
+        _program(program), forwarder,
+        model_credential=ModelCredential(OAUTH_TOKEN_VARIABLE, model_secret),
+    )(run)
+
+    assert outcome.exit_status == 1
+    assert "<redacted>" in caplog.text
+    assert not any(secret[at : at + 8] in caplog.text for at in range(len(secret) - 7))
+
+
+def test_failed_stderr_redacts_multiple_active_secrets_before_tail_clipping(
+    forwarder, run, caplog, monkeypatch
+):
+    sentinel = "aB3-cD4_eF5gH6iJ7kL8mN9oP0qR1sT2"
+    model_secret = "mY4-aC6_gH8jK0lP2rS5uV7wX9zB1dE3"
+    monkeypatch.setattr(run_spawner.secrets, "token_urlsafe", lambda size: sentinel)
+    program = f'''\
+import os, sys
+sentinel = os.environ["JIRA_API_TOKEN"]
+credential = os.environ[{OAUTH_TOKEN_VARIABLE!r}]
+sys.stderr.write("complaint " + sentinel + " " + credential + " " + sentinel
+                 + " safe " + "." * {run_spawner.STDERR_TAIL - 50})
+sys.exit(1)
+'''
+
+    spawner_for(
+        _program(program), forwarder,
+        model_credential=ModelCredential(OAUTH_TOKEN_VARIABLE, model_secret),
+    )(run)
+
+    for secret in (sentinel, model_secret):
+        assert not any(secret[at : at + 8] in caplog.text for at in range(len(secret) - 7))
+    [record] = [record for record in caplog.records if "wrote to stderr:" in record.getMessage()]
+    assert record.getMessage() == (
+        f"run {run.run_id} wrote to stderr: complaint <redacted> <redacted> <redacted> safe "
+        + "." * (run_spawner.STDERR_TAIL - 50)
+    )
+
+
+@pytest.mark.parametrize("credential_text", [
+    "Authorization: Basic {secret}", "Bearer {secret}",
+    "curl -u user@example.invalid:{secret}", "--api-key={secret}",
+    "JIRA_API_TOKEN={secret}", "password {secret}", "{secret}",
+    "sk-ant-api03-{secret}",
+])
+def test_failed_stderr_redacts_supported_shapes_before_tail_clipping(
+    forwarder, run, caplog, credential_text
+):
+    secret = "0123456789abcdef0123456789abcdef"
+    message = ("complaint " + credential_text.format(secret=secret)
+               + "." * (run_spawner.STDERR_TAIL - 16))
+    program = f"import sys\nsys.stderr.write({message!r})\nsys.exit(1)"
+
+    outcome = spawner_for(_program(program), forwarder)(run)
+
+    assert outcome.exit_status == 1
+    assert "<redacted>" in caplog.text
+    assert not any(secret[at : at + 8] in caplog.text for at in range(len(secret) - 7))
+
+
+def test_credential_free_stderr_preserves_exact_tail(forwarder, run, caplog):
+    message = "  complaint " + "." * (run_spawner.STDERR_TAIL + 10) + " final reason  \n"
+    program = f"import sys\nsys.stderr.write({message!r})\nsys.exit(1)"
+
+    spawner_for(_program(program), forwarder)(run)
+
+    [record] = [record for record in caplog.records if "wrote to stderr:" in record.getMessage()]
+    assert record.getMessage() == (
+        f"run {run.run_id} wrote to stderr: " + message.strip()[-run_spawner.STDERR_TAIL:]
+    )
 
 
 def test_a_run_that_is_killed_leaves_what_it_said_up_to_then(forwarder, run):
@@ -721,7 +922,7 @@ def test_spawner_registers_the_helpers_content_before_execution_and_clears_it(
     run.notification_path.write_text(json.dumps(notification))
     facts = Facts(PROJECT_KEY, "ses-demo", None, None, None, "Completed")
     rendered = run.working_directory.parent / RENDERED_SKILL
-    rendered.mkdir()
+    rendered.mkdir(exist_ok=True)
     (rendered / FACTS_FILE).write_text(facts.as_json())
     spawner = spawner_for([], forwarder)
 
@@ -767,3 +968,260 @@ def test_finish_prefix_reaches_the_receiver_outcome_without_sockets(tmp_path, fi
     assert outcome.exit_status == 0
     assert outcome.failure == failure
     forwarder.clear_sentinel.assert_called_once()
+
+
+class TimeoutForwarder:
+    """Record the public Sentinel lifetime without a real service or socket."""
+
+    url = "http://127.0.0.1:1"
+
+    def __init__(self):
+        self.active = False
+        self.changes = []
+        self.cleared = threading.Event()
+
+    def set_sentinel(self, sentinel, create_fields=None):
+        assert not self.active, "a following Run started before Sentinel cleanup"
+        self.active = True
+        self.changes.append(("set", time.monotonic()))
+
+    def clear_sentinel(self):
+        self.active = False
+        self.changes.append(("clear", time.monotonic()))
+        self.cleared.set()
+
+
+def timeout_notification_and_facts(runs):
+    from grafana_jsm_sandbox.incident_payload import FACTS_FILE, Facts
+    from grafana_jsm_sandbox.run_command import RENDERED_SKILL
+
+    rendered = runs / RENDERED_SKILL
+    rendered.mkdir(parents=True)
+    facts = Facts(PROJECT_KEY, "ses-demo", None, None, None, "Completed")
+    (rendered / FACTS_FILE).write_text(facts.as_json())
+    return (FIXTURES / "mvp/notification-group-firing.json").read_bytes()
+
+
+def exited_parent_with_pipe_child(directory, pipe):
+    """The child confirms reparenting; this cannot pass by killing a live parent."""
+    pid_path = directory / "child.pid"
+    exited_path = directory / "parent-exited"
+    survived_path = directory / "child-survived"
+    redirected_pipe = "stderr" if pipe == "stdout" else "stdout"
+    child = f"""\
+import os, pathlib, time
+parent = os.getppid()
+pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()))
+while os.getppid() == parent:
+    time.sleep(0.01)
+pathlib.Path({str(exited_path)!r}).write_text(str(time.monotonic()))
+time.sleep(6)
+pathlib.Path({str(survived_path)!r}).touch()
+"""
+    parent = f"""\
+import pathlib, subprocess, sys, time
+if not pathlib.Path({str(pid_path)!r}).exists():
+    subprocess.Popen([sys.executable, '-c', {child!r}], {redirected_pipe}=subprocess.DEVNULL)
+    while not pathlib.Path({str(pid_path)!r}).exists():
+        time.sleep(0.01)
+print('{{"type":"result","subtype":"success","is_error":false}}', flush=True)
+"""
+    return parent, pid_path, exited_path, survived_path
+
+
+def stop_timeout_child(pid_path):
+    """Failing old-code tests must still leave no live stand-in processes."""
+    if pid_path.exists():
+        try:
+            os.kill(int(pid_path.read_text()), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def assert_timeout_child_reaped(pid_path):
+    """The external subreaper must collect the orphan, not just leave it killed."""
+    pid = int(pid_path.read_text())
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.01)
+    pytest.fail("the pipe-holding child was not reaped")
+
+
+@pytest.mark.parametrize("pipe", ["stdout", "stderr"])
+def test_an_exited_parent_with_a_pipe_child_is_timed_out_and_revoked(tmp_path, pipe):
+    runs = tmp_path / "runs"
+    notification = timeout_notification_and_facts(runs)
+    run = a_run(runs)
+    run.notification_path.write_bytes(notification)
+    code, pid_path, exited_path, survived_path = exited_parent_with_pipe_child(tmp_path, pipe)
+    forwarder = TimeoutForwarder()
+    started_at = time.monotonic()
+    try:
+        outcome = spawner_for(_program(code), forwarder, timeout=2)(run)
+        assert_timeout_child_reaped(pid_path)
+    finally:
+        stop_timeout_child(pid_path)
+
+    parent_exited_at = float(exited_path.read_text())
+    assert parent_exited_at - started_at < 2, "the parent did not exit before the deadline"
+    assert outcome.exit_status == 0, "this must reproduce an already-exited successful parent"
+    assert outcome.failure == "killed after its 2s timeout"
+    assert forwarder.cleared.is_set() and not forwarder.active
+    assert forwarder.changes[-1][1] - started_at < 4, "revocation waited for the child"
+    assert not survived_path.exists(), "the pipe-holding child outlived the timeout"
+
+
+@pytest.mark.parametrize("pipe", ["stdout", "stderr"])
+def test_an_exited_parent_timeout_cleans_up_before_the_following_run(tmp_path, monkeypatch, pipe):
+    from unittest.mock import Mock
+
+    from grafana_jsm_sandbox import receiver as receiver_module
+
+    # Drive the public serial worker without binding an HTTP listening socket.
+    monkeypatch.setattr(receiver_module, "ThreadingHTTPServer", lambda *args: Mock())
+    runs = tmp_path / "runs"
+    notification = timeout_notification_and_facts(runs)
+    code, pid_path, exited_path, survived_path = exited_parent_with_pipe_child(tmp_path, pipe)
+    forwarder = TimeoutForwarder()
+    outcomes = []
+    finished = threading.Event()
+    spawner = spawner_for(_program(code), forwarder, timeout=2)
+
+    def spawn(run):
+        outcome = spawner(run)
+        outcomes.append(outcome)
+        if len(outcomes) == 2:
+            finished.set()
+        return outcome
+
+    receiver = Receiver(spawn, runs)
+    receiver.start()
+    started_at = time.monotonic()
+    try:
+        receiver.accept(notification)
+        receiver.accept(notification)
+        assert finished.wait(4), "the pipe-holding child stalled the following Run"
+        assert_timeout_child_reaped(pid_path)
+    finally:
+        stop_timeout_child(pid_path)
+        receiver.stop()
+
+    assert float(exited_path.read_text()) - started_at < 2
+    assert outcomes[0].exit_status == 0
+    assert outcomes[0].failure == "killed after its 2s timeout"
+    assert (outcomes[1].exit_status, outcomes[1].failure) == (0, None)
+    assert [change for change, _ in forwarder.changes] == ["set", "clear", "set", "clear"]
+    assert not survived_path.exists()
+
+
+def test_a_closed_stdout_does_not_remove_the_running_parents_timeout(tmp_path):
+    runs = tmp_path / "runs"
+    notification = timeout_notification_and_facts(runs)
+    run = a_run(runs)
+    run.notification_path.write_bytes(notification)
+    code = "import os, time; os.close(1); time.sleep(6)"
+    started_at = time.monotonic()
+    outcome = spawner_for(_program(code), TimeoutForwarder(), timeout=0.5)(run)
+
+    assert time.monotonic() - started_at < 3
+    assert outcome.exit_status != 0
+    assert outcome.failure == "killed after its 0.5s timeout"
+
+
+def test_a_completed_run_is_not_timed_out_by_a_callback_racing_with_cleanup(tmp_path, monkeypatch):
+    """Fire at EOF before wait/reaping, after the real parent has already exited."""
+    runs = tmp_path / "runs"
+    notification = timeout_notification_and_facts(runs)
+    run = a_run(runs)
+    run.notification_path.write_bytes(notification)
+    callbacks = []
+
+    class DeadlineAtCleanup:
+        def __init__(self, interval, function, args):
+            self.function, self.args = function, args
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            callbacks.append(True)
+            self.function(*self.args)
+
+        def join(self):
+            pass
+
+    monkeypatch.setattr(run_spawner.threading, "Timer", DeadlineAtCleanup)
+    outcome = spawner_for(_program(EMIT_A_TRANSCRIPT), TimeoutForwarder())(run)
+
+    assert callbacks == [True]
+    assert (outcome.exit_status, outcome.failure) == (0, None)
+
+
+@pytest.mark.parametrize("dense", [False, True])
+def test_stderr_active_values_split_at_reads_and_shrink_before_tail(
+    run, caplog, monkeypatch, dense
+):
+    sentinel = "aB3-cD4_eF5gH6iJ7kL8mN9oP0qR1sT2"
+    model = "mY4-aC6_gH8jK0lP2rS5uV7wX9zB1dE3"
+    viewer = "vZ2-fT4_dP6nR8sU0wX3aC5eG7hJ9kL1"
+    monkeypatch.setattr(run_spawner.secrets, "token_urlsafe", lambda size: sentinel)
+    caplog.set_level(logging.INFO)
+    body = ("safe " + sentinel + " " + model + " " + viewer + " ") * 200 if dense else (
+        "x" * 8180 + sentinel + " " + model + " " + viewer + "." * 1930
+    )
+    body += " final diagnostic" + " \t\n" * 10000
+    program = _program(
+        "import sys", f"sys.stderr.write({body!r})", EMIT_A_TRANSCRIPT, "sys.exit(3)"
+    )
+    spawner_for(
+        program, InvestigationForwarder(), model_credential=ModelCredential(OAUTH_TOKEN_VARIABLE, model),
+        investigation_environment={"DEMO_GRAFANA_VIEWER_TOKEN": viewer},
+    )(run)
+    from grafana_jsm_sandbox.log_formatter import redact
+
+    expected = redact(body, active_secrets=(sentinel, model, viewer)).strip()[-2000:]
+    diagnostics = [r.getMessage() for r in caplog.records if "wrote to stderr:" in r.getMessage()]
+    assert diagnostics == [f"run {run.run_id} wrote to stderr: {expected}"]
+    for secret in (sentinel, model, viewer):
+        assert not any(secret[at:at + 8] in caplog.text for at in range(len(secret) - 7))
+    assert json.loads(run.transcript_path.read_text().splitlines()[-1])["type"] == "result"
+
+
+def test_transcript_entry_failure_cleans_up_the_deadline_before_reaping(run, monkeypatch):
+    timers = []
+
+    class RecordedTimer:
+        def __init__(self, interval, function, args):
+            self.cancelled = self.joined = False
+            timers.append(self)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            self.cancelled = True
+
+        def join(self):
+            self.joined = True
+
+    def entry_failure(self):
+        raise RuntimeError("synthetic Transcript entry failure")
+
+    original_wait = run_spawner.subprocess.Popen.wait
+
+    def wait_after_deadline_cleanup(process, *args, **kwargs):
+        assert timers[0].cancelled and timers[0].joined
+        return original_wait(process, *args, **kwargs)
+
+    monkeypatch.setattr(run_spawner.threading, "Timer", RecordedTimer)
+    monkeypatch.setattr(run_spawner._Transcript, "__enter__", entry_failure)
+    monkeypatch.setattr(run_spawner.subprocess.Popen, "wait", wait_after_deadline_cleanup)
+    forwarder = TimeoutForwarder()
+    with pytest.raises(RuntimeError, match="synthetic Transcript entry failure"):
+        spawner_for(_program("import time; time.sleep(6)"), forwarder)(run)
+    assert not forwarder.active
+    assert forwarder.cleared.is_set()

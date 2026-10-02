@@ -24,8 +24,8 @@ the stack down.
              inside the container (`--in-container`, below)
     grafana  what the running Grafana took from the provisioning files, asked of its
              HTTP API on the laptop port compose published it on: the contact point, the
-             one-minute repeat, the rule, a series for the rule's query, and whether the
-             rule is Normal
+             incident_group policy with one-minute updates and three-minute repeats,
+             every MVP rule, a series for each rule's query, and whether each is Normal
 
 `--only` names the layers to run, comma-separated, still in that order.
 `--with-model` adds one short, real Run to the stack layer; it is off by default
@@ -316,10 +316,20 @@ RECEIVER_ON_THE_NETWORK = "http://demo:8080/notification"
 """The Receiver as Grafana's contact point must name it: by compose service name."""
 
 RULE_UID = "rolldice-rate-zero"
-"""The provisioned alert rule (grafana/provisioning/alerting/alert-rule.yaml)."""
+"""The primary Alert rule, also watched by chapter-one verify."""
+
+EXPECTED_RULES = {
+    RULE_UID: "30s",
+    "rolldice-2xx-drop": "30s",
+    "rolldice-probe-failing": "20s",
+    "rolldice-outage-sustained": "2m",
+}
+"""The MVP's provisioned Alert rules and their pending periods."""
 
 EVALUATION_INTERVAL = 10
-PENDING_PERIOD = "30s"
+GROUP_BY = ["incident_group"]
+GROUP_INTERVAL = "1m"
+INCIDENT_GROUP = "checkout-outage"
 REPEAT_INTERVAL = "3m"
 LONGEST_GROUP_WAIT = 30
 RULE_SERVICE = "rolldice"
@@ -1259,8 +1269,8 @@ def service_line(name: str, entry: dict | None) -> Line:
 def in_container_lines(laptop: Laptop) -> list[Line]:
     """This command inside the demo container, its lines passed on as it printed them.
 
-    The project key `.env` holds now goes with it, so a container created from an older
-    `.env`, whose Skill names another project, is caught here.
+    The non-secret project key and session `.env` holds now go with it, so a container
+    created for another project or rehearsal is caught here.
     """
     argv = [
         "docker",
@@ -1274,7 +1284,8 @@ def in_container_lines(laptop: Laptop) -> list[Line]:
         "--in-container",
     ]
     try:
-        argv += ["--project-key", DemoProject.from_environment(laptop.values()).key]
+        project = DemoProject.from_environment(laptop.values())
+        argv += ["--project-key", project.key, "--session-id", project.session_id]
     except ConfigurationError:
         pass
     timeout = IN_CONTAINER_TIMEOUT
@@ -1302,13 +1313,17 @@ def in_container_lines(laptop: Laptop) -> list[Line]:
     if lines and answer.returncode in (0, 1):
         return lines
     text = f"{answer.stderr}\n{answer.stdout}"
-    if "No module named grafana_jsm_sandbox.doctor" in text:
+    missing_doctor = "No module named grafana_jsm_sandbox.doctor" in text
+    missing_session_check = "unrecognized arguments: --session-id" in text
+    if missing_doctor or missing_session_check:
         return [
             Line(
                 STACK,
                 FAIL,
                 "in-container",
-                "the demo image predates doctor: rebuild it with `docker compose up -d --build demo`",
+                "the demo image predates "
+                f"{'doctor' if missing_doctor else 'the session check'}: rebuild it with "
+                "`docker compose up -d --build demo`",
             )
         ]
     last = (answer.stderr.strip() or answer.stdout.strip()).splitlines()[-1:] or [""]
@@ -1374,7 +1389,7 @@ def seconds(duration: object) -> int | None:
 
 
 def grafana(laptop: Laptop) -> list[Line]:
-    """What the running Grafana took from the provisioning files, and whether its rule can fire.
+    """What the running Grafana took from provisioning, and whether the MVP rules can fire.
 
     A typo in a provisioning file makes Grafana skip it and say so only in its own log,
     so the files are never read back: Grafana is asked what it actually holds.
@@ -1395,11 +1410,12 @@ def grafana(laptop: Laptop) -> list[Line]:
     point_line, point = contact_point_line(points)
     lines.append(point_line)
     lines.append(checked("policy", policy_line, base, point))
-    rule_line, rule = rule_check(base)
-    lines.append(rule_line)
-    if rule is not None:
-        lines.append(checked("series", series_line, base, rule))
-        lines.append(checked("state", state_line, base, rule))
+    for uid, pending_period in EXPECTED_RULES.items():
+        rule_line, rule = rule_check(base, uid, pending_period)
+        lines.append(rule_line)
+        if rule is not None:
+            lines.append(checked("series", series_line, base, rule))
+            lines.append(checked("state", state_line, base, rule))
     return lines
 
 
@@ -1448,6 +1464,13 @@ def policy_line(base: str, point: str | None) -> Line:
         problems.append(f"it sends to {policy.get('receiver')}, not {point}")
     if policy.get("routes"):
         problems.append("it has child routes, which may send the Alert elsewhere")
+    if policy.get("group_by") != GROUP_BY:
+        problems.append(f"its group_by is {policy.get('group_by')}, not {GROUP_BY}")
+    if seconds(policy.get("group_interval")) != seconds(GROUP_INTERVAL):
+        problems.append(
+            f"its group_interval is {policy.get('group_interval')}, not {GROUP_INTERVAL}, so "
+            "related Alerts would not join on the demo's update timing"
+        )
     if policy.get("repeat_interval") != REPEAT_INTERVAL:
         problems.append(
             f"it repeats every {policy.get('repeat_interval')}, not every {REPEAT_INTERVAL}, so "
@@ -1467,19 +1490,25 @@ def policy_line(base: str, point: str | None) -> Line:
             f"the notification policy: {'; '.join(problems)}; `docker compose restart lgtm` "
             "reads grafana/provisioning/alerting again",
         )
-    return Line(GRAFANA, OK, "policy", f"everything to {point}, repeated every {REPEAT_INTERVAL}")
+    return Line(
+        GRAFANA,
+        OK,
+        "policy",
+        f"everything to {point}, grouped by incident_group, updated every {GROUP_INTERVAL}, "
+        f"repeated every {REPEAT_INTERVAL}",
+    )
 
 
-def rule_check(base: str) -> tuple[Line, dict | None]:
+def rule_check(base: str, uid: str, pending_period: str) -> tuple[Line, dict | None]:
     try:
         rules = as_list(ask_grafana(base, "/api/v1/provisioning/alert-rules"))
-        rule = next((as_dict(r) for r in rules if as_dict(r).get("uid") == RULE_UID), None)
+        rule = next((as_dict(r) for r in rules if as_dict(r).get("uid") == uid), None)
         if rule is None:
             return Line(
                 GRAFANA,
                 FAIL,
                 "rule",
-                f"Grafana has no rule {RULE_UID}: it did not take "
+                f"Grafana has no rule {uid}: it did not take "
                 "grafana/provisioning/alerting/alert-rule.yaml; `docker compose logs lgtm` says why",
             ), None
         group = as_dict(
@@ -1490,12 +1519,12 @@ def rule_check(base: str) -> tuple[Line, dict | None]:
             )
         )
     except GrafanaUnanswered as failure:
-        return Line(GRAFANA, FAIL, "rule", f"{failure}: {GRAFANA_FIX}"), None
+        return Line(GRAFANA, FAIL, "rule", f"{uid}: {failure}: {GRAFANA_FIX}"), None
     problems = []
     if group.get("interval") != EVALUATION_INTERVAL:
         problems.append(f"it is evaluated every {group.get('interval')}s, not every 10s")
-    if rule.get("for") != PENDING_PERIOD:
-        problems.append(f"it fires after {rule.get('for')}, not {PENDING_PERIOD}")
+    if rule.get("for") != pending_period:
+        problems.append(f"it fires after {rule.get('for')}, not {pending_period}")
     labels = as_dict(rule.get("labels"))
     missing = [label for label in FIELD_MAPPING_LABELS if not labels.get(label)]
     if missing:
@@ -1504,19 +1533,22 @@ def rule_check(base: str) -> tuple[Line, dict | None]:
         )
     elif labels.get("service") != RULE_SERVICE:
         problems.append(f"its service label is not {RULE_SERVICE}, which the Skill reads")
+    if labels.get("incident_group") != INCIDENT_GROUP:
+        problems.append(f"its incident_group label is not {INCIDENT_GROUP}")
     if problems:
         return Line(
             GRAFANA,
             FAIL,
             "rule",
-            f"{RULE_UID}: {'; '.join(problems)}; `docker compose restart lgtm` reads "
+            f"{uid}: {'; '.join(problems)}; `docker compose restart lgtm` reads "
             "grafana/provisioning/alerting again",
         ), rule
     return Line(
         GRAFANA,
         OK,
         "rule",
-        f"{rule.get('title')}, evaluated every {EVALUATION_INTERVAL}s, firing after {PENDING_PERIOD}",
+        f"{uid}: {rule.get('title')}, evaluated every {EVALUATION_INTERVAL}s, "
+        f"firing after {pending_period}",
     ), rule
 
 
@@ -1540,7 +1572,7 @@ def series_line(base: str, rule: dict) -> Line:
             GRAFANA,
             FAIL,
             "series",
-            f"{RULE_UID} has no {PROMETHEUS} query: `docker compose restart lgtm` reads "
+            f"{rule.get('uid')} has no {PROMETHEUS} query: `docker compose restart lgtm` reads "
             "grafana/provisioning/alerting again",
         )
     answer = as_dict(
@@ -1556,11 +1588,14 @@ def series_line(base: str, rule: dict) -> Line:
             GRAFANA,
             FAIL,
             "series",
-            "the rule's query matches no series, so the rule reads NoData, stays Normal and "
+            f"{rule.get('uid')}: the rule's query matches no series, so the rule reads NoData, "
+            "stays Normal and "
             "never fires: rolldice may not have exported yet (wait a minute after `up`, and see "
             "`docker compose ps rolldice`), or the metric's name moved with the image",
         )
-    return Line(GRAFANA, OK, "series", f"the rule's query matches {len(series)} series")
+    return Line(
+        GRAFANA, OK, "series", f"{rule.get('uid')}: the rule's query matches {len(series)} series"
+    )
 
 
 def rule_states(base: str, uid: object) -> list[str]:
@@ -1581,16 +1616,17 @@ def rule_states(base: str, uid: object) -> list[str]:
 
 
 def state_line(base: str, rule: dict) -> Line:
-    states = rule_states(base, rule.get("uid"))
+    uid = rule.get("uid")
+    states = rule_states(base, uid)
     if states == ["inactive"]:
-        return Line(GRAFANA, OK, "state", "the rule is Normal")
+        return Line(GRAFANA, OK, "state", f"{uid}: the rule is Normal")
     if not states:
-        return Line(GRAFANA, WARN, "state", "Grafana has not evaluated the rule yet")
+        return Line(GRAFANA, WARN, "state", f"{uid}: Grafana has not evaluated the rule yet")
     return Line(
         GRAFANA,
         WARN,
         "state",
-        f"the rule is {', '.join(str(state) for state in states)}, not Normal: with "
+        f"{uid}: the rule is {', '.join(str(state) for state in states)}, not Normal: with "
         f"`docker compose start {TRAFFIC}` it goes Normal within a minute",
     )
 
@@ -1615,6 +1651,7 @@ def in_container(
     with_model: bool,
     expected_key: str | None = None,
     *,
+    expected_session: str | None = None,
     refuse: Callable[[], bool] = refused_first,
     environment: Mapping[str, str] | None = None,
     receiver_environ: Path = RECEIVER_ENVIRON,
@@ -1663,6 +1700,18 @@ def in_container(
                 "project key",
                 f"the container was created with DEMO_PROJECT_KEY={settings.project.key}, and .env "
                 f"now names {expected_key}: recreate it with `docker compose up -d demo` "
+                "(a restart keeps the environment it was created with)",
+            )
+        )
+    if expected_session is not None and expected_session != settings.project.session_id:
+        lines.append(
+            Line(
+                CONTAINER,
+                FAIL,
+                "session",
+                f"the container was created with {SESSION_ID_VARIABLE}="
+                f"{settings.project.session_id}, and .env now names {expected_session}: "
+                "recreate it with `docker compose up -d demo` "
                 "(a restart keeps the environment it was created with)",
             )
         )
@@ -1841,7 +1890,7 @@ def model_lines(
         trust_store=trust_store_from_environment(environment),
     )
     try:
-        outcome = spawn(run)
+        outcome = spawn.run_diagnostic(run)
     except OSError as failure:
         return [
             Line(
@@ -2223,6 +2272,7 @@ def main(
         help="the container's own checks; the stack layer runs this with docker compose exec",
     )
     parser.add_argument("--project-key", help=argparse.SUPPRESS)
+    parser.add_argument("--session-id", help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
     if arguments.in_container:
         if arguments.only:
@@ -2233,7 +2283,12 @@ def main(
         # Nothing before this reads the environment. Run as a command, the process
         # made itself non-dumpable before its imports; `in_container` says how that
         # went before it reads anything.
-        lines = in_container(arguments.with_model, arguments.project_key, **dict(inside or {}))
+        lines = in_container(
+            arguments.with_model,
+            arguments.project_key,
+            expected_session=arguments.session_id,
+            **dict(inside or {}),
+        )
         blocker = None
         for line in lines:
             print(line.text, flush=True)

@@ -32,10 +32,12 @@ from grafana_jsm_sandbox.configure import (
     FACT_VARIABLES,
     SITE_FACTS_MARKER,
     SITE_FIELDS,
+    Change,
     create_component_command,
     main,
+    write,
 )
-from grafana_jsm_sandbox.demo_config import read_env_file
+from grafana_jsm_sandbox.demo_config import DemoProject, read_env_file
 from tests.conftest import FIXTURES, REPOSITORY
 
 JIRA_FIXTURES = FIXTURES / "jira"
@@ -1835,3 +1837,144 @@ def test_in_progress_discovery_uses_the_only_status_or_the_preferred_name(config
     said = configure(jira)
     assert said.code == 1
     assert "DEMO_STATUS_IN_PROGRESS" in said.check("statuses")[0]
+
+
+DOTENV_STATUSES = (
+    "Investigating #1",
+    "#Investigating",
+    "Investigating#1",
+    '"Investigating"',
+    "'Investigating'",
+    "Owner's investigation",
+    "Path\\investigation",
+    '"Path\\investigation"',
+    '"literal\\n\\t\\r"',
+    'Escaped \\"quote\\"',
+    "Path\\",
+    "$ROUNDTRIP_TEST_SENTINEL investigating",
+    "${ROUNDTRIP_TEST_SENTINEL} investigating",
+    '$ROUNDTRIP_TEST_SENTINEL "quoted"',
+    "$ROUNDTRIP_TEST_SENTINEL\\\\",
+    "Cost $$ value",
+    "$",
+)
+
+
+def sole_in_progress(jira: FakeJira, name: str) -> None:
+    statuses = incident_statuses(jira)
+    statuses[:] = [s for s in statuses if s["statusCategory"]["key"] != "indeterminate"]
+    statuses.append({"name": name, "statusCategory": {"key": "indeterminate"}})
+
+
+@pytest.mark.parametrize("status", DOTENV_STATUSES)
+@pytest.mark.parametrize("existing", [False, True], ids=["append", "replace"])
+def test_discovered_status_is_preserved_through_write_read_and_project(
+    configure, env_file, status, existing
+):
+    jira = FakeJira()
+    sole_in_progress(jira, status)
+    original = ENV_FILE.replace("\n", "\r\n")
+    if existing:
+        original += "  export DEMO_STATUS_IN_PROGRESS=Old # keep the note\r\n"
+    env_file.write_bytes(original.encode())
+    env_file.chmod(0o600)
+
+    said = configure(jira, "--write")
+
+    assert said.code == 0, said.out
+    values = read_env_file(env_file)
+    assert values["DEMO_STATUS_IN_PROGRESS"] == status
+    assert DemoProject.from_environment(values).status_in_progress == status
+    written = env_file.read_bytes().decode()
+    assert "\n" not in written.replace("\r\n", "")
+    assert written.startswith(original.split("# Its field ids", 1)[0])
+    if existing:
+        line = next(line for line in written.splitlines() if "export DEMO_STATUS" in line)
+        assert line.startswith("  export DEMO_STATUS_IN_PROGRESS=")
+        assert line.endswith(" # keep the note")
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    assert [p.name for p in env_file.parent.iterdir()] == [".env"]
+    assert not any(line.startswith("+ DEMO_STATUS_") for line in configure(jira).lines)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "$ROUNDTRIP_TEST_SENTINEL's",
+        "$ROUNDTRIP_TEST_SENTINEL\\",
+        " padded",
+        "padded ",
+        "two\nlines",
+        "two\twords",
+        "two\u2028lines",
+    ],
+)
+@pytest.mark.parametrize("existing", [False, True], ids=["append", "replace"])
+def test_unrepresentable_discovered_status_refuses_the_entire_write(
+    configure, env_file, status, existing
+):
+    jira = FakeJira()
+    sole_in_progress(jira, status)
+    original = ENV_FILE + ("DEMO_STATUS_IN_PROGRESS=Old\n" if existing else "")
+    env_file.write_bytes(original.encode())
+    env_file.chmod(0o600)
+
+    said = configure(jira, "--write")
+
+    assert said.code == 1
+    assert env_file.read_bytes() == original.encode()
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    assert [p.name for p in env_file.parent.iterdir()] == [".env"]
+    assert said.lines[-1].startswith("NOT READY: .env: DEMO_STATUS_IN_PROGRESS")
+    assert status not in said.lines[-1], "the refusal names syntax, not the supplied value"
+    assert not any("change(s) written" in line or line == "READY" for line in said.lines)
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="needs the docker compose CLI")
+def test_encoded_facts_are_literal_in_compose_and_the_local_reader(tmp_path):
+    """Parser only: a synthetic project, no daemon, images, containers or real configuration."""
+    path = tmp_path / ".env"
+    (tmp_path / "compose.yml").write_text(
+        "services:\n  probe:\n    image: alpine:3.20\n    env_file: [.env]\n"
+    )
+
+    def resolve():
+        return subprocess.run(
+            ["docker", "compose", "config", "--format", "json"],
+            cwd=tmp_path,
+            env={
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": os.environ.get("HOME", ""),
+                "ROUNDTRIP_TEST_SENTINEL": "must-not-interpolate",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    path.write_text("PROBE=ready\n")
+    prerequisite = resolve()
+    if prerequisite.returncode != 0:
+        pytest.skip(
+            f"synthetic Compose parser prerequisite unavailable: {prerequisite.stderr.strip()}"
+        )
+    assert json.loads(prerequisite.stdout)["services"]["probe"]["environment"] == {"PROBE": "ready"}
+
+    changes = []
+    original = []
+    expected = {}
+    for number, status in enumerate(DOTENV_STATUSES):
+        for placement in ("APPEND", "REPLACE"):
+            name = f"VALUE_{placement}_{number}"
+            changes.append(Change(name, "Old" if placement == "REPLACE" else None, status))
+            expected[name] = status
+            if placement == "REPLACE":
+                original.append(f"  export {name}=Old # preserved\n")
+    path.write_text("".join(original))
+    write(path, changes)
+    resolved = resolve()
+    assert resolved.returncode == 0, resolved.stderr
+    actual = json.loads(resolved.stdout)["services"]["probe"]["environment"]
+    actual = {name: value.replace("$$", "$") for name, value in actual.items()}
+    assert actual == expected
+    assert read_env_file(path) == expected

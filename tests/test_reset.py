@@ -302,6 +302,206 @@ def test_the_queue_is_cleared_before_the_traffic_moves():
     assert order[-1] == "compose" and order.count("compose") == 1
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("synthetic nonzero jira-as exit"),
+        FileNotFoundError(2, "synthetic missing executable", "jira-as"),
+        PermissionError(13, "synthetic executable denied", "jira-as"),
+        subprocess.TimeoutExpired(["jira-as"], 120),
+    ],
+    ids=["nonzero", "missing", "permission", "timeout"],
+)
+def test_adapter_failure_retains_preceding_results_and_stops_remaining_jira_work(compose, failure):
+    ops = FakeOps(
+        {key: FakeIncident("Open", ["fp-example"]) for key in ("OPS-20", "OPS-21", "OPS-22")}
+    )
+    calls = []
+
+    def jira_as(*arguments):
+        calls.append(arguments)
+        if arguments[:3] == ("lifecycle", "transitions", "OPS-21"):
+            raise failure
+        return ops(*arguments)
+
+    outcome = reset(KEY, jira_as=jira_as, compose=compose)
+
+    assert outcome.closed == ["OPS-20"]
+    assert set(outcome.unknown) == {"OPS-21", "OPS-22"}
+    assert "not processed" in outcome.unknown["OPS-22"]
+    assert str(failure) in outcome.jira_failure
+    assert not outcome.queue_is_empty and not outcome.finished
+    assert calls[-1][:3] == ("lifecycle", "transitions", "OPS-21")
+    assert ops.incidents["OPS-21"].status == ops.incidents["OPS-22"].status == "Open"
+    assert compose.calls == [("start", "traffic")] and outcome.traffic_started
+
+
+def test_main_reports_partial_reset_and_unknown_queue_after_adapter_failure(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text(ENV_FILE)
+    ops = FakeOps(
+        {key: FakeIncident("Open", ["fp-example"]) for key in ("SANDBOX-20", "SANDBOX-21")},
+        key="SANDBOX",
+    )
+    compose = FakeCompose()
+
+    def jira_as(*arguments):
+        if arguments[:3] == ("lifecycle", "transitions", "SANDBOX-21"):
+            raise RuntimeError("synthetic Jira unavailable")
+        return ops(*arguments)
+
+    assert main([], env_file=env_file, jira_as=jira_as, compose=compose) == 1
+
+    said = capsys.readouterr().out
+    assert "SANDBOX-20: completed with resolution Done and closed" in said
+    assert "SANDBOX-21:" in said and "unknown" in said
+    assert "synthetic Jira unavailable" in said
+    assert said.rstrip().endswith("queue state is unknown")
+    assert "queue is empty" not in said and "queue is NOT empty" not in said
+    assert compose.calls == [("start", "traffic")]
+
+
+@pytest.mark.parametrize(
+    "stage,apply_first,resolution_confirmed",
+    [
+        ("resolve", True, False),
+        ("readback", False, False),
+        ("reset-comment", False, True),
+        ("close-lookup", False, True),
+        ("close", True, True),
+        ("correction-comment", False, True),
+    ],
+)
+def test_uncertain_writes_and_failed_reads_stop_without_retry_or_close_claim(
+    compose, stage, apply_first, resolution_confirmed
+):
+    workflow = (
+        {**WORKFLOW, "Completed": {"51": "Open"}}
+        if stage == "correction-comment"
+        else WORKFLOW
+    )
+    ops = FakeOps(
+        {key: FakeIncident("Open", ["fp-example"]) for key in ("OPS-20", "OPS-21")},
+        workflow=workflow,
+    )
+    calls = []
+    failures = []
+    prefixes = {
+        "resolve": ("lifecycle", "transition", "OPS-20", "--id", "21"),
+        "readback": ("issue", "get", "OPS-20"),
+        "reset-comment": ("collaborate", "comment", "add", "OPS-20", "-b", RESET_COMMENT),
+        "close": ("lifecycle", "transition", "OPS-20", "--id", "41"),
+        "correction-comment": (
+            "collaborate", "comment", "add", "OPS-20", "-b", CLOSE_FAILED_COMMENT
+        ),
+    }
+
+    def jira_as(*arguments):
+        calls.append(arguments)
+        fails = (
+            arguments[:3] == ("lifecycle", "transitions", "OPS-20")
+            and ops.incidents["OPS-20"].status == "Completed"
+            if stage == "close-lookup"
+            else arguments[: len(prefixes[stage])] == prefixes[stage]
+        )
+        if fails:
+            if apply_first:
+                ops(*arguments)
+            failures.append(arguments)
+            raise subprocess.TimeoutExpired(["jira-as", *arguments], 120)
+        return ops(*arguments)
+
+    outcome = reset(KEY, jira_as=jira_as, compose=compose)
+
+    assert outcome.closed == outcome.resolved == outcome.unclosed == []
+    assert outcome.left == {}
+    assert set(outcome.unknown) == {"OPS-20", "OPS-21"}
+    why = outcome.unknown["OPS-20"]
+    assert "unknown" in why and "not closed" not in why
+    assert ("resolution was read back" in why) is resolution_confirmed
+    if resolution_confirmed:
+        assert "transition to Completed was acknowledged" in why
+    assert "not processed" in outcome.unknown["OPS-21"]
+    assert ops.incidents["OPS-21"].status == "Open"
+    assert compose.calls == [("start", "traffic")]
+    assert not outcome.finished and not outcome.queue_is_empty
+    if stage == "close":
+        assert ops.incidents["OPS-20"].status == "Closed", "lost acknowledgement is not rejection"
+        assert ops.incidents["OPS-20"].comments == [RESET_COMMENT]
+    if stage in {"resolve", "readback"}:
+        assert transitions_of(ops, "OPS-20") == ["21"]
+    assert len(failures) == 1, "the uncertain operation is never retried"
+    assert calls[-1] == failures[0], "no Jira read or write follows adapter failure"
+
+
+@pytest.mark.parametrize("jql", [OPEN_INCIDENTS, UNRESOLVED_COMPLETED, STUCK_INCIDENTS])
+def test_search_failures_report_unknown_queue_and_retained_results(tmp_path, capsys, jql):
+    env_file = tmp_path / ".env"
+    env_file.write_text(ENV_FILE)
+    ops = FakeOps({"SANDBOX-20": FakeIncident("Open", ["fp-example"])}, key="SANDBOX")
+    compose = FakeCompose(failure=subprocess.CalledProcessError(1, ["docker", "compose"]))
+    calls = []
+
+    def jira_as(*arguments):
+        calls.append(arguments)
+        if arguments[:3] == ("search", "jql", jql.format(key="SANDBOX")):
+            raise RuntimeError("synthetic search unavailable")
+        return ops(*arguments)
+
+    assert main([], env_file=env_file, jira_as=jira_as, compose=compose) == 1
+
+    said = capsys.readouterr().out
+    assert said.rstrip().endswith("queue state is unknown")
+    assert "synthetic search unavailable" in said and "traffic NOT started" in said
+    assert "queue is empty" not in said and "queue is NOT empty" not in said
+    assert calls[-1][:3] == ("search", "jql", jql.format(key="SANDBOX"))
+    assert compose.calls == [("start", "traffic")]
+    if jql == STUCK_INCIDENTS:
+        assert "SANDBOX-20: completed with resolution Done and closed" in said
+        assert ops.incidents["SANDBOX-20"].status == "Closed"
+    else:
+        assert ops.incidents["SANDBOX-20"].status == "Open"
+        assert all(call[:2] == ("search", "jql") for call in calls)
+        if jql == UNRESOLVED_COMPLETED:
+            assert "SANDBOX-20: not processed" in said
+
+
+def test_dry_run_adapter_failure_reports_unknown_without_any_effects(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text(ENV_FILE)
+    ops = FakeOps({"SANDBOX-20": FakeIncident("Open", ["fp-example"])}, key="SANDBOX")
+    compose = FakeCompose()
+
+    def jira_as(*arguments):
+        if arguments[:2] == ("lifecycle", "transitions"):
+            raise RuntimeError("synthetic lookup unavailable")
+        return ops(*arguments)
+
+    assert main(["--dry-run"], env_file=env_file, jira_as=jira_as, compose=compose) == 1
+
+    said = capsys.readouterr().out
+    assert said.rstrip().endswith("queue state would be unknown")
+    assert "dry run: nothing was changed" in said
+    assert ops.incidents["SANDBOX-20"].status == "Open"
+    assert ops.incidents["SANDBOX-20"].comments == [] and compose.calls == []
+
+
+@pytest.mark.parametrize(
+    "compose_failure",
+    [subprocess.CalledProcessError(1, ["docker", "compose"]), RuntimeError("recovery bug")],
+)
+def test_unexpected_jira_error_is_not_masked_by_failed_traffic_recovery(compose_failure):
+    compose = FakeCompose(failure=compose_failure)
+
+    def jira_as(*arguments):
+        return "not valid JSON"
+
+    with pytest.raises(json.JSONDecodeError):
+        reset(KEY, jira_as=jira_as, compose=compose)
+
+    assert compose.calls == [("start", "traffic")]
+
+
 # --- A reset that cannot strand an Incident (step 04 of demo-onboarding) ---
 
 
@@ -339,7 +539,7 @@ def test_the_resolution_is_read_back_after_the_move_and_before_the_close(compose
     assert asked[-1] == ("lifecycle", "transition", "OPS-20")
 
 
-def test_a_close_jira_refuses_leaves_the_incident_for_a_human_and_the_reset_goes_on(compose):
+def test_a_close_adapter_failure_stops_jira_and_preserves_confirmed_resolution(compose):
     ops = FakeOps(
         {
             "OPS-31": FakeIncident("Open", ["fp-87e2f184874a3b71"]),
@@ -351,14 +551,18 @@ def test_a_close_jira_refuses_leaves_the_incident_for_a_human_and_the_reset_goes
     outcome = reset(KEY, jira_as=ops, compose=compose)
 
     assert outcome.closed == []
-    assert set(outcome.left) == {"OPS-31", "OPS-32"}
-    assert "not closed" in outcome.left["OPS-31"]
-    assert "HTTP 400" in outcome.left["OPS-31"]
+    assert outcome.left == {} and outcome.unclosed == []
+    assert set(outcome.unknown) == {"OPS-31", "OPS-32"}
+    assert "resolution" in outcome.unknown["OPS-31"]
+    assert "unknown" in outcome.unknown["OPS-31"]
+    assert "HTTP 400" in outcome.jira_failure
     assert ops.incidents["OPS-31"].resolution == RESOLUTION
-    assert ops.incidents["OPS-31"].comments == [RESET_COMMENT, CLOSE_FAILED_COMMENT], (
-        "its history must not end on a close that never happened"
+    assert ops.incidents["OPS-31"].comments == [RESET_COMMENT], (
+        "an uncertain Close cannot be followed by another write"
     )
-    assert outcome.queue_is_empty, "resolved with Done, so out of the queue already"
+    assert ops.calls[-1][:3] == ("lifecycle", "transition", "OPS-31")
+    assert ops.incidents["OPS-32"].status == "Open"
+    assert not outcome.queue_is_empty
     assert not outcome.finished
     assert outcome.traffic_started
 
@@ -375,7 +579,7 @@ def test_an_incident_with_no_road_from_completed_to_closed_is_left(compose):
     assert ops.incidents["OPS-33"].comments == [RESET_COMMENT, CLOSE_FAILED_COMMENT]
 
 
-def test_a_failed_close_ends_the_report_with_an_empty_queue_and_a_close_left_to_do(
+def test_an_uncertain_close_ends_the_report_with_unknown_queue_state(
     tmp_path, capsys
 ):
     env_file = tmp_path / ".env"
@@ -389,7 +593,8 @@ def test_a_failed_close_ends_the_report_with_an_empty_queue_and_a_close_left_to_
     assert main([], env_file=env_file, compose=FakeCompose(), jira_as=ops) == 1
 
     said = capsys.readouterr().out.splitlines()
-    assert said[-1] == "queue is empty; 1 left for a human to close"
+    assert said[-1] == "queue state is unknown"
+    assert not any("not closed" in line or "queue is empty" in line for line in said)
 
 
 def test_a_rerun_after_the_admin_fix_reopens_and_closes_what_the_first_run_left(tmp_path, capsys):

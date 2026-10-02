@@ -26,6 +26,7 @@ import secrets
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,7 @@ from grafana_jsm_sandbox.log_formatter import (
     RETRY,
     format_stream,
     redact,
+    redact_stderr_chunks,
     run_failure,
 )
 from grafana_jsm_sandbox.receiver import Run, RunOutcome
@@ -217,14 +219,27 @@ class RunSpawner:
 
     def __call__(self, run: Run) -> RunOutcome:
         """Run one Run to completion and say how it ended."""
-        sentinel = secrets.token_urlsafe(SENTINEL_BYTES)
         try:
             group = read_group(run.notification_path)
             facts = read_facts(run.working_directory.parent / RENDERED_SKILL / FACTS_FILE)
             expected = create_fields(group, facts) if group.firing else None
         except PayloadError as failure:
-            logger.warning("run %s has no create content: %s", run.run_id, failure)
-            expected = None
+            # The required helper cannot process this input. Refuse locally before
+            # granting authority or spending a model invocation on the same error.
+            return RunOutcome(1, f"preflight failed: {failure}")
+        return self._with_sentinel(run, expected)
+
+    def run_diagnostic(self, run: Run) -> RunOutcome:
+        """Run a trusted caller's non-incident probe without Notification preflight.
+
+        Doctor selects this path explicitly for its tool/Skill checks. No Incident
+        create content is registered; a diagnostic cannot authorize a create.
+        """
+        return self._with_sentinel(run, None)
+
+    def _with_sentinel(self, run: Run, expected: dict | None) -> RunOutcome:
+        """Register authority for one invocation and clear it on every exit path."""
+        sentinel = secrets.token_urlsafe(SENTINEL_BYTES)
         self.forwarder.set_sentinel(sentinel, expected)
         try:
             return self._execute(run, sentinel)
@@ -233,7 +248,12 @@ class RunSpawner:
 
     def _execute(self, run: Run, sentinel: str) -> RunOutcome:
         timed_out = threading.Event()
-        transcript = _Transcript(run.transcript_path)
+        stdout_done = threading.Event()
+        active_secrets = (
+            sentinel, self.model_credential.value,
+            self.investigation_environment.get("DEMO_GRAFANA_VIEWER_TOKEN", ""),
+        )
+        transcript = _Transcript(run.transcript_path, active_secrets=active_secrets)
         logger.info("run %s transcript: %s", run.run_id, run.transcript_path)
         process = subprocess.Popen(
             list(self.command),
@@ -251,20 +271,44 @@ class RunSpawner:
             # Receiver's one worker would wait on it for as long as it lived.
             start_new_session=True,
         )
+        deadline = time.monotonic() + self.timeout
         # Both pipes were asked for above, so neither of them is None.
-        errors = _Drained(cast("IO[str]", process.stderr))
-        killer = threading.Timer(self.timeout, _kill, (process, timed_out))
+        errors = _Drained(cast("IO[str]", process.stderr), active_secrets=active_secrets)
+        killer = threading.Timer(
+            max(0, deadline - time.monotonic()),
+            _kill,
+            (process, timed_out, stdout_done, errors.done),
+        )
         killer.start()
-        try:
-            # The timer stays armed across this whole block, the reaping in
-            # `__exit__` included, so nothing here can outlive the timeout.
-            with process, transcript:
-                stream = transcript.tee(cast("IO[str]", process.stdout))
-                for line in format_stream(stream):
-                    logger.log(LEVELS.get(line.split(" ", 1)[0], logging.INFO), "%s", line)
+        with process:
+            try:
+                with transcript:
+                    stream = transcript.tee(cast("IO[str]", process.stdout))
+                    for line in format_stream(stream, active_secrets=active_secrets):
+                        logger.log(LEVELS.get(line.split(" ", 1)[0], logging.INFO), "%s", line)
+                    stdout_done.set()
+            except BaseException:
+                # Do not let context-manager reaping wait forever if consuming
+                # the Transcript fails while the Run or its children are alive.
+                _kill(process, timed_out, stdout_done, errors.done)
+                raise
+            finally:
+                # Keep the deadline armed while stderr is held by descendants,
+                # too. Closing its file in Popen.__exit__ before the reader ends
+                # would wait for the read lock after timeout protection stopped.
+                errors.done.wait()
+                # Join an already-running callback before wait() can release the
+                # session leader's PID. A descendant holding either pipe must never
+                # make the callback reap that leader before signalling its group.
+                killer.cancel()
+                killer.join()
+            try:
+                exit_status = process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                # Closing stdout alone does not finish a still-running parent;
+                # this wait shares the deadline instead of starting a new budget.
+                _kill(process, timed_out, stdout_done, errors.done)
                 exit_status = process.wait()
-        finally:
-            killer.cancel()
         errors.join(STDERR_TIMEOUT)
 
         if timed_out.is_set():
@@ -272,7 +316,7 @@ class RunSpawner:
                 "run %s exceeded its %.0fs timeout and was killed", run.run_id, self.timeout
             )
         if exit_status != 0 and errors.text:
-            logger.warning("run %s wrote to stderr: %s", run.run_id, redact(errors.text))
+            logger.warning("run %s wrote to stderr: %s", run.run_id, redact(errors.text, active_secrets=active_secrets))
         return RunOutcome(exit_status, self._failure(timed_out, transcript, exit_status))
 
     def _failure(
@@ -332,8 +376,9 @@ class _Transcript:
     still gets every line.
     """
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, active_secrets: tuple[str, ...] = ()):
         self.path = path
+        self._active_secrets = active_secrets
         self.failure: str | None = None
         self.finished = False
         self._file: IO[str] | None = None
@@ -380,7 +425,7 @@ class _Transcript:
             return
         if isinstance(event, dict) and event.get("type") == "result":
             self.finished = True
-            self.failure = self.failure or run_failure(event)
+            self.failure = self.failure or run_failure(event, active_secrets=self._active_secrets)
 
 
 class _Drained:
@@ -390,28 +435,52 @@ class _Drained:
     its timeout, but what it said should not arrive in the log as one vast line.
     """
 
-    def __init__(self, stream: IO[str]):
+    def __init__(self, stream: IO[str], *, active_secrets: tuple[str, ...] = ()):
         self.text = ""
+        self.done = threading.Event()
+        self._active_secrets = active_secrets
         self._thread = threading.Thread(target=self._read, args=(stream,), daemon=True)
         self._thread.start()
 
     def _read(self, stream: IO[str]) -> None:
-        self.text = stream.read().strip()[-STDERR_TAIL:]
+        try:
+            # Keep the exact tail of the stripped stream without retaining the stream.
+            # Trailing whitespace might be arbitrarily long: keep it separately until
+            # a later non-whitespace character makes it interior, or discard it at EOF.
+            tail = pending = ""
+            chunks = iter(lambda: stream.read(8192), "")
+            for chunk in redact_stderr_chunks(chunks, active_secrets=self._active_secrets):
+                significant = chunk.rstrip()
+                if significant:
+                    text = tail + pending + significant if tail else significant.lstrip()
+                    tail = text[-STDERR_TAIL:]
+                    pending = chunk[len(significant):][-STDERR_TAIL:]
+                elif tail:
+                    pending = (pending + chunk)[-STDERR_TAIL:]
+            self.text = tail
+        finally:
+            self.done.set()
 
     def join(self, timeout: float) -> None:
         self._thread.join(timeout)
 
 
-def _kill(process: subprocess.Popen, timed_out: threading.Event) -> None:
-    """End a Run that has taken too long, and everything it started.
+def _kill(
+    process: subprocess.Popen,
+    timed_out: threading.Event,
+    stdout_done: threading.Event,
+    stderr_done: threading.Event,
+) -> None:
+    """End an overlong Run and its original process group.
 
-    The whole session goes, not just the Run: the Claude CLI's own children hold
-    the Transcript pipe, so killing it alone would leave the Receiver reading a
-    pipe that never closes.
+    The Claude CLI's children can hold either pipe even after it exits; ending
+    only the parent would leave the Receiver waiting for a pipe that never closes.
     """
-    if process.poll() is not None:
-        # It finished on its own between this timer firing and now, so it did not
-        # exceed anything and nothing should say it did.
+    if stdout_done.is_set() and stderr_done.is_set() and process.poll() is not None:
+        # Both readers done and an exited parent mean genuine completion. Poll
+        # may reap here only because no group signal follows. While either pipe
+        # remains open, retain the leader's PID even after its exit: its original
+        # group can still contain descendants holding the inherited pipes.
         return
     timed_out.set()
     try:

@@ -182,11 +182,11 @@ minute except the first.
     ```
 
     Prints one line per Incident it closed or left alone, then `queue is empty` and exit 0
-    when nothing is left in the Incidents queue. Any key it names is a human's: an open
+    when nothing is left for a human and the traffic started. A key it leaves names the reason: an open
     Incident in a status a Run never uses, or without an `fp-` label, finished in the Jira UI;
     one it completed but Jira left without a resolution, which needs the Jira admin to put
     Resolution on the Resolve screen, after which the next reset reopens and closes it; one
-    whose `Close` failed, already out of the queue and ending the report with `queue is empty;
+    with no transition to `Close`, already out of the queue and ending the report with `queue is empty;
     N left for a human to close`; or a `Canceled` or `Closed` Incident with no resolution, which
     only deletion removes from the queue and which it prints the delete command for. If `docker
     compose` fails, the report still prints, with the `docker compose start traffic` to run by
@@ -422,7 +422,8 @@ Resolution field, jira-as 2.0.0 quietly resolves without one, and closing that I
 strand it in the queue, so the reset leaves it on Completed and says to ask the Jira admin to put
 Resolution on the Resolve screen. Completed keeps the road back, so once the admin has, the next
 reset reopens that Incident, resolves it with Done and closes it; one without an `fp-` label it
-names instead, for a human to reopen and resolve. A `Close` that fails is left for a human too,
+names instead, for a human to reopen and resolve. When there is no transition to `Close`,
+it is left for a human too,
 with a second comment saying so; it is already resolved and out of the queue, so the report ends
 `queue is empty; N left for a human to close`, and the exit is 1.
 It prints what it did per key and ends with `queue is empty` and exit 0, or names what it left:
@@ -433,6 +434,10 @@ resolution, which nothing but deletion can take out of the queue and which it pr
 command for, with `--confirm` and a warning that deletion is permanent. It never offers to delete
 a Completed one. It does not cancel anything: `Canceled` carries no
 resolution and stays in the queue for good (ADR 0004). It does not delete anything either.
+If Jira fails, the reset keeps confirmed earlier results, names the current and remaining known
+Incidents whose state is unknown, and stops further Jira calls without retrying a write. It still
+tries to start traffic once, but ends `queue state is unknown` and exits 1. A failed final search
+also makes the queue state unknown, even when the earlier Incidents were closed.
 If `docker compose` fails to start the traffic, the report still prints, with a line naming
 `docker compose start traffic` to run by hand, and the exit is 1.
 `python3 -m grafana_jsm_sandbox.reset --dry-run` prints the same report in the conditional

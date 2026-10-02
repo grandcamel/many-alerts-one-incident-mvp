@@ -889,6 +889,7 @@ def test_it_imports_nothing_that_could_reach_out():
         "urllib.parse",
         "grafana_jsm_sandbox.investigation_contract",
         "grafana_jsm_sandbox.loki_evidence",
+        "grafana_jsm_sandbox.prometheus_evidence",
         "grafana_jsm_sandbox.tempo_evidence",
         "re",
         "grafana_jsm_sandbox.investigation_artifact",
@@ -1243,6 +1244,80 @@ def test_all_failed_evidence_deduplicates_reasons_in_first_seen_order(tmp_path):
     assert "observed zero" not in investigation_body(command, working)
 
 
+def test_conflicting_metric_summary_invalidates_even_an_earlier_success(tmp_path):
+    inconsistent = evidence_record(value="2")
+    inconsistent["sample_summary"]["sample_count"] = 999
+    inconsistent["sample_summary"]["series"][0].update(
+        count=999, latest={"timestamp": 1790863800, "value": "123"}, min="100", max="456")
+
+    command, working = investigate_on(tmp_path, [evidence_record(), inconsistent])
+
+    text = investigation_body(command, working)
+    assert "Observation: Evidence unavailable" in text
+    assert text.endswith("Evidence: unavailable: evidence file unreadable")
+    assert "999 samples" not in text and "observed zero" not in text
+
+
+def test_discovery_backend_error_cannot_be_rendered_as_success(tmp_path):
+    record = evidence_record(command="get")
+    record["response"] = {"status": "error", "error": "query failed"}
+    record["sample_summary"].update(result_type="discovery", series_count=0,
+                                    sample_count=0, series=[], discovery_items=2)
+
+    command, working = investigate_on(tmp_path, [record])
+
+    text = investigation_body(command, working)
+    assert "Observation: Evidence unavailable" in text
+    assert "discovery: 2 items" not in text
+
+
+@pytest.mark.parametrize("command", ["instant", "range", "get"])
+def test_failed_metric_query_with_a_stale_summary_invalidates_the_file(tmp_path, command):
+    record = evidence_record(command=command, value="2")
+    record.update(status="unavailable", response=None,
+                  error={"kind": "timeout", "message": "timeout after 10s", "http_status": None})
+
+    command, working = investigate_on(tmp_path, [evidence_record(), record])
+
+    text = investigation_body(command, working)
+    assert "Observation: Evidence unavailable" in text
+    assert text.endswith("Evidence: unavailable: evidence file unreadable")
+
+
+@pytest.mark.parametrize("command", ["instant", "range", "get"])
+@pytest.mark.parametrize("change", ["count", "labels", "latest", "bounds", "status", "raw_value"])
+def test_metric_summary_and_status_must_agree_with_retained_response(tmp_path, command, change):
+    record = evidence_record(command=command, value="2")
+    series = record["sample_summary"]["series"][0]
+    if change == "count":
+        record["sample_summary"]["sample_count"] = series["count"] = 2
+    elif change == "labels":
+        series["labels"] = {"service_name": "different-service"}
+    elif change == "latest":
+        series["latest"]["value"] = "3"
+    elif change == "bounds":
+        series.update(min="1", max="3")
+    elif change == "status":
+        record["status"] = "empty"
+    else:
+        record["response"]["data"]["result"][0]["value"][1] = "3"
+
+    line, working = investigate_on(tmp_path, [record])
+
+    assert investigation_body(line, working).endswith("Evidence: unavailable: evidence file unreadable")
+
+
+def test_discovery_count_must_agree_with_returned_items(tmp_path):
+    record = evidence_record(command="get")
+    record["response"] = {"status": "success", "data": ["one-label"]}
+    record["sample_summary"].update(result_type="discovery", series_count=0,
+                                    sample_count=0, series=[], discovery_items=3)
+
+    line, working = investigate_on(tmp_path, [record])
+
+    assert investigation_body(line, working).endswith("Evidence: unavailable: evidence file unreadable")
+
+
 @pytest.mark.parametrize("raw", [b'{bad json}\n', b'\xff', b'\n', b'null\n'])
 def test_unreadable_jsonl_is_unavailable_and_exits_zero(tmp_path, raw, capsys):
     from grafana_jsm_sandbox.investigation_contract import EVIDENCE_FILENAME
@@ -1253,6 +1328,41 @@ def test_unreadable_jsonl_is_unavailable_and_exits_zero(tmp_path, raw, capsys):
     output = capsys.readouterr()
     assert output.err == "" and output.out.count("\n") == 1
     assert "evidence file unreadable" in investigation_body(output.out.strip(), working)
+
+
+@pytest.mark.parametrize("data", [
+    b"[1e999999999999999999999]",
+    b"[1e-999999999999999999999]",
+    b"[" * 10000 + b"1" + b"]" * 10000,
+], ids=["positive-exponent", "negative-exponent", "decoder-recursion"])
+@pytest.mark.parametrize("has_previous", [False, True], ids=["new-file", "append"])
+def test_unrepresentable_jsonl_is_wholly_unavailable_in_reader_and_adf(
+    tmp_path, capsys, data, has_previous
+):
+    _, working = investigate_on(tmp_path, [evidence_record()] if has_previous else None)
+    path = working / "grafana-evidence.jsonl"
+    previous = path.read_bytes() if has_previous else b""
+    discovery = evidence_record(command="get")
+    discovery["response"] = {"status": "success", "data": [1]}
+    discovery["sample_summary"].update(
+        result_type="discovery", series_count=0, sample_count=0, series=[], discovery_items=1
+    )
+    encoded = json.dumps(discovery, separators=(",", ":")).encode()
+    bad_record = encoded.replace(b'"data":[1]', b'"data":' + data)
+    assert bad_record != encoded
+    contents = previous + bad_record + b"\n"
+    path.write_bytes(contents)
+
+    assert incident_payload.read_evidence(path) == ([], "evidence file unreadable")
+    assert main(investigation_argv(), working) == 0
+
+    output = capsys.readouterr()
+    assert output.err == "" and output.out.count("\n") == 1
+    body = investigation_body(output.out.strip(), working)
+    assert "Observation: Evidence unavailable" in body
+    assert body.endswith("Evidence: unavailable: evidence file unreadable")
+    assert "observed zero" not in body
+    assert path.read_bytes() == contents, "unavailable display does not modify retained evidence"
 
 
 def test_unreadable_evidence_path_is_unavailable(tmp_path):
@@ -1267,6 +1377,7 @@ def test_investigation_instant_and_discovery_wording(tmp_path, command):
     if command == "get":
         record["sample_summary"].update(result_type="discovery", series_count=0,
                                         sample_count=0, series=[], discovery_items=3)
+        record["response"] = {"status": "success", "data": ["__name__", "service_name", "path"]}
     line, working = investigate_on(tmp_path, [record])
     body = investigation_body(line, working)
     assert "step " not in body
@@ -1296,7 +1407,9 @@ def test_nonzero_and_nonfinite_data_never_become_observed_zero(tmp_path, value):
 
 def test_unmodelled_data_is_not_zero_or_absent(tmp_path):
     record = evidence_record()
-    record["sample_summary"].update(unmodelled_count=1)
+    record["response"]["data"]["result"][0]["histogram"] = [1790863800, {"count": "1"}]
+    record["sample_summary"].update(unmodelled_count=1, sample_count=2)
+    record["sample_summary"]["series"][0]["count"] = 2
     command, working = investigate_on(tmp_path, [record])
     assert "observed zero" not in investigation_body(command, working) and "unmodelled samples=1" in investigation_body(command, working)
 
@@ -1340,7 +1453,8 @@ def test_mixed_nonfinite_and_zero_bounds_never_report_observed_zero(tmp_path):
     record["response"]["data"].update(resultType="matrix", result=[
         {"metric": {}, "values": [[1, "NaN"], [2, "0"]]}])
     record["sample_summary"].update(sample_count=2, result_type="matrix")
-    record["sample_summary"]["series"][0]["count"] = 2
+    record["sample_summary"]["series"][0].update(
+        count=2, labels={}, latest={"timestamp": 2, "value": "0"})
     line, working = investigate_on(tmp_path, [record])
     assert "observed zero" not in investigation_body(line, working) and "2 samples" in investigation_body(line, working)
 
@@ -1350,6 +1464,7 @@ def test_a_scalar_zero_is_an_observed_sample(tmp_path, kind):
     record = evidence_record()
     record["response"]["data"].update(resultType=kind, result=[1790863800, "0"])
     record["sample_summary"]["result_type"] = kind
+    record["sample_summary"]["series"][0]["labels"] = {}
     line, working = investigate_on(tmp_path, [record])
     assert "observed zero" in investigation_body(line, working)
 

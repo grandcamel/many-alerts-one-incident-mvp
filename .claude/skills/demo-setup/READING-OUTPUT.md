@@ -86,14 +86,18 @@ Remaining in the open status after an update is a WARN; it does not fail the one
 <KEY>: <why it was left for a human>
 <KEY>: open without a fp- label, so not a Run's; left alone
 <KEY>: done without a resolution, so in the Incidents queue for good; only `jira-as api call deleteIssue ...` removes it, ...
+<KEY>: [<confirmed observation>; ]current state is unknown after <phase>: <why>
+<KEY>: not processed after Jira failure; current state is unknown
+Jira reset stopped: <phase>: <why>
 ```
 
 A dry run then prints `traffic would be started`, `dry run: nothing was changed` and
-`queue would be empty` or `queue would NOT be empty`. A real run prints `traffic started` or
-`traffic NOT started: <why>`, and ends `queue is empty`,
-`queue is empty; <n> left for a human to close` or `queue is NOT empty`. Exit 0 when nothing is
-left (and, for real, the traffic started), else 1; a `.env` error is exit 1 with its sentence on
-stderr.
+`queue would be empty`, `queue would NOT be empty` or `queue state would be unknown`. A real run
+prints `traffic started` or `traffic NOT started: <why>`, and ends `queue is empty`,
+`queue is empty; <n> left for a human to close`, `queue is NOT empty` or `queue state is unknown`.
+Exit 0 when nothing is left and, for real, the traffic started, else 1; a `.env` error is exit 1
+with its sentence on stderr. A Jira failure stops further Jira calls without retrying a write;
+confirmed earlier results remain in the report, and the real reset still tries to start traffic once.
 
 ## Acting on a blocker
 

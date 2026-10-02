@@ -287,7 +287,6 @@ def healthy_grafana() -> dict[str, object]:
     receiver = point["receivers"][0]
     policy = yaml.safe_load((PROVISIONING / "notification-policy.yaml").read_text())["policies"][0]
     group = yaml.safe_load((PROVISIONING / "alert-rule.yaml").read_text())["groups"][0]
-    rule = group["rules"][0]
     return {
         "/api/v1/provisioning/contact-points": [
             {"uid": "", "name": "email receiver", "type": "email", "settings": {}},
@@ -316,6 +315,7 @@ def healthy_grafana() -> dict[str, object]:
                 "labels": rule["labels"],
                 "data": rule["data"],
             }
+            for rule in group["rules"]
         ],
         f"/api/v1/provisioning/folder/demo-folder/rule-groups/{group['name']}": {
             "title": group["name"],
@@ -329,7 +329,11 @@ def healthy_grafana() -> dict[str, object]:
             },
         },
         "/api/prometheus/grafana/api/v1/rules": {
-            "data": {"groups": [{"rules": [{"uid": rule["uid"], "state": "inactive"}]}]}
+            "data": {
+                "groups": [{"rules": [
+                    {"uid": rule["uid"], "state": "inactive"} for rule in group["rules"]
+                ]}]
+            }
         },
     }
 
@@ -1194,6 +1198,8 @@ def test_a_healthy_stack_passes_on_the_container_s_lines(env_file):
         "--in-container",
         "--project-key",
         KEY,
+        "--session-id",
+        "rehearsal1",
     )
     assert timeout == doctor.IN_CONTAINER_TIMEOUT
 
@@ -1270,6 +1276,18 @@ def test_an_image_from_before_doctor_is_told_to_rebuild(env_file):
     assert line.level == "FAIL" and "docker compose up -d --build demo" in line.message
 
 
+def test_mvp_image_before_session_check_is_told_to_rebuild(env_file):
+    runner = healthy_runner({
+        ("docker", "compose", "exec"): Answer(
+            2, "", "doctor: error: unrecognized arguments: --session-id take2"
+        )
+    })
+
+    line = only(doctor.in_container_lines(laptop(env_file, run=runner)), "in-container")
+
+    assert line.level == "FAIL" and "docker compose up -d --build demo" in line.message
+
+
 def test_an_in_container_crash_is_one_redacted_line(env_file):
     runner = healthy_runner(
         {
@@ -1321,14 +1339,15 @@ def test_a_grafana_that_took_the_provisioning_files_is_ok(env_file, fake_grafana
     assert [(line.check, line.level) for line in lines] == [
         ("contact point", "OK"),
         ("policy", "OK"),
-        ("rule", "OK"),
-        ("series", "OK"),
-        ("state", "OK"),
+        *([("rule", "OK"), ("series", "OK"), ("state", "OK")] * len(MVP_RULES)),
     ]
-    ((path, form),) = fake_grafana.posted
-    assert path == "/api/datasources/proxy/uid/prometheus/api/v1/query"
-    rule = yaml.safe_load((PROVISIONING / "alert-rule.yaml").read_text())["groups"][0]["rules"][0]
-    assert form["query"] == [rule["data"][0]["model"]["expr"]]
+    rules = yaml.safe_load((PROVISIONING / "alert-rule.yaml").read_text())["groups"][0]["rules"]
+    assert [path for path, _ in fake_grafana.posted] == [
+        "/api/datasources/proxy/uid/prometheus/api/v1/query"
+    ] * len(rules)
+    assert [form["query"] for _, form in fake_grafana.posted] == [
+        [rule["data"][0]["model"]["expr"]] for rule in rules
+    ]
 
 
 def test_no_grafana_is_one_stop_naming_the_service(env_file):
@@ -1401,7 +1420,7 @@ def test_what_grafana_did_not_take_is_a_stop(env_file, fake_grafana, change, che
 
     lines = doctor.grafana(laptop(grafana_env(env_file, fake_grafana)))
 
-    line = only(lines, check)
+    line = lines_of(lines, check)[0]
     assert line.level == "FAIL" and words in line.message, line.text
 
 
@@ -1410,7 +1429,7 @@ def test_no_rule_is_a_stop_and_its_query_is_not_run(env_file, fake_grafana):
 
     lines = doctor.grafana(laptop(grafana_env(env_file, fake_grafana)))
 
-    assert only(lines, "rule").level == "FAIL"
+    assert all(line.level == "FAIL" for line in lines_of(lines, "rule"))
     assert not lines_of(lines, "series") and not fake_grafana.posted
 
 
@@ -1419,7 +1438,7 @@ def test_a_firing_rule_only_warns(env_file, fake_grafana):
         "state"
     ] = "firing"
 
-    line = only(doctor.grafana(laptop(grafana_env(env_file, fake_grafana))), "state")
+    line = lines_of(doctor.grafana(laptop(grafana_env(env_file, fake_grafana))), "state")[0]
 
     assert line.level == "WARN" and "docker compose start traffic" in line.message
 
@@ -1431,7 +1450,185 @@ def test_an_api_error_fails_that_check_alone(env_file, fake_grafana):
 
     assert only(lines, "policy").level == "FAIL"
     assert "answered 500" in only(lines, "policy").message
-    assert only(lines, "rule").level == "OK"
+    assert all(line.level == "OK" for line in lines_of(lines, "rule"))
+
+
+MVP_RULES = {
+    "rolldice-rate-zero": "30s",
+    "rolldice-2xx-drop": "30s",
+    "rolldice-probe-failing": "20s",
+    "rolldice-outage-sustained": "2m",
+}
+
+
+def injected_grafana(monkeypatch):
+    """All provisioned rules, with no HTTP or running Grafana required."""
+    answers = healthy_grafana()
+    posted = []
+
+    def ask(base, path, form=None):
+        if form is not None:
+            posted.append(form)
+        return answers[path]
+
+    monkeypatch.setattr(doctor, "ask_grafana", ask)
+    return answers, posted
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("group_by", ["alertname"]),
+        ("group_by", ["incident_group", "alertname"]),
+        ("group_interval", "10m"),
+        ("group_interval", None),
+    ],
+)
+def test_mvp_policy_requires_grouping_and_update_interval(monkeypatch, field, value):
+    answers, _ = injected_grafana(monkeypatch)
+    answers["/api/v1/provisioning/policies"][field] = value
+
+    line = doctor.policy_line("injected", "demo-receiver")
+
+    assert line.level == "FAIL" and field in line.message
+
+
+@pytest.mark.parametrize("uid", MVP_RULES)
+def test_mvp_doctor_requires_each_provisioned_rule(env_file, monkeypatch, uid):
+    answers, posted = injected_grafana(monkeypatch)
+    answers["/api/v1/provisioning/alert-rules"] = [
+        rule for rule in answers["/api/v1/provisioning/alert-rules"] if rule["uid"] != uid
+    ]
+
+    lines = doctor.grafana(laptop(env_file))
+
+    assert any(line.level == "FAIL" and f"no rule {uid}" in line.message for line in lines)
+    assert len(posted) == len(MVP_RULES) - 1
+
+
+@pytest.mark.parametrize("uid", MVP_RULES)
+@pytest.mark.parametrize("group", [None, "another-fault"])
+def test_mvp_rules_require_the_same_incident_group(env_file, monkeypatch, uid, group):
+    answers, _ = injected_grafana(monkeypatch)
+    rule = next(r for r in answers["/api/v1/provisioning/alert-rules"] if r["uid"] == uid)
+    rule["labels"]["incident_group"] = group
+
+    lines = doctor.grafana(laptop(env_file))
+
+    assert any(
+        line.level == "FAIL" and uid in line.message and "incident_group" in line.message
+        for line in lines
+    )
+
+
+@pytest.mark.parametrize("uid", MVP_RULES)
+def test_mvp_each_rule_has_its_own_pending_period(env_file, monkeypatch, uid):
+    answers, _ = injected_grafana(monkeypatch)
+    rule = next(r for r in answers["/api/v1/provisioning/alert-rules"] if r["uid"] == uid)
+    rule["for"] = "5m"
+
+    lines = doctor.grafana(laptop(env_file))
+
+    assert any(
+        line.level == "FAIL" and uid in line.message
+        and f"fires after 5m, not {MVP_RULES[uid]}" in line.message
+        for line in lines
+    )
+
+
+def test_mvp_policy_accepts_an_equivalent_one_minute_interval(monkeypatch):
+    answers, _ = injected_grafana(monkeypatch)
+    answers["/api/v1/provisioning/policies"]["group_interval"] = "60s"
+
+    assert doctor.policy_line("injected", "demo-receiver").level == "OK"
+
+
+def test_mvp_companion_rule_query_must_match_series(env_file, monkeypatch):
+    answers, _ = injected_grafana(monkeypatch)
+    companion = answers["/api/v1/provisioning/alert-rules"][1]
+    missing = companion["data"][0]["model"]["expr"]
+    query_path = "/api/datasources/proxy/uid/prometheus/api/v1/query"
+
+    def ask(base, path, form=None):
+        if path == query_path and form["query"] == missing:
+            return {"data": {"result": []}}
+        return answers[path]
+
+    monkeypatch.setattr(doctor, "ask_grafana", ask)
+    lines = doctor.grafana(laptop(env_file))
+
+    assert any(
+        line.check == "series"
+        and line.level == "FAIL"
+        and companion["uid"] in line.message
+        and "matches no series" in line.message
+        for line in lines
+    )
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"), [("take2", "take2"), (None, "demo"), (" ", "demo")]
+)
+def test_mvp_container_argv_carries_only_nonsecret_session_expectation(
+    env_file, configured, expected
+):
+    env_file.write_text(env_text(DEMO_SESSION_ID=configured))
+    runner = healthy_runner()
+
+    doctor.in_container_lines(laptop(env_file, run=runner))
+
+    (argv,) = runner.asked("docker", "compose", "exec")
+    assert argv[-4:] == ("--project-key", KEY, "--session-id", expected)
+    assert all(secret not in " ".join(argv) for secret in (*SECRETS, API_KEY))
+
+
+@pytest.mark.parametrize(
+    ("running", "expected", "level"),
+    [("take1", "take2", "FAIL"), (None, "demo", "OK"), ("take2", "take2", "OK")],
+)
+def test_mvp_container_checks_session_parity_without_external_calls(
+    runs, monkeypatch, running, expected, level
+):
+    monkeypatch.setattr(
+        doctor, "receiver_environ_line",
+        lambda path: Line("container", "OK", "receiver environ", "injected"),
+    )
+    monkeypatch.setattr(
+        doctor, "myself_line", lambda credential: Line("container", "OK", "whoami", "injected")
+    )
+    environment = {
+        "JIRA_SITE_URL": NOWHERE,
+        "JIRA_EMAIL": "robot@example.invalid",
+        "JIRA_API_TOKEN": "synthetic",
+        "CLAUDE_CODE_OAUTH_TOKEN": OAUTH_TOKEN,
+        "DEMO_PROJECT_KEY": KEY,
+        "RUNS_DIRECTORY": str(runs),
+        "SKILL_DIRECTORY": str(REPOSITORY / "skill"),
+    }
+    if running is not None:
+        environment["DEMO_SESSION_ID"] = running
+    printed = []
+    monkeypatch.setattr("builtins.print", lambda text, **kwargs: printed.append(text))
+    model_calls = []
+
+    def model(settings, environment):
+        model_calls.append(settings.project.session_id)
+        return []
+
+    monkeypatch.setattr(doctor, "model_lines", model)
+
+    code = main(
+        ["--in-container", "--project-key", KEY, "--session-id", expected, "--with-model"],
+        inside={"refuse": lambda: True, "environment": environment},
+    )
+
+    assert code == (1 if level == "FAIL" else 0)
+    assert model_calls == ([] if level == "FAIL" else [expected])
+    if level == "FAIL":
+        line = only([Line.parse(text) for text in printed[:-1]], "session")
+        assert "DEMO_SESSION_ID=take1" in line.message and "take2" in line.message
+        assert "docker compose up -d demo" in line.message
+        assert "a restart keeps the environment" in line.message
 
 
 def test_the_checked_values_are_the_provisioning_files():
@@ -1442,10 +1639,14 @@ def test_the_checked_values_are_the_provisioning_files():
     assert policy["repeat_interval"] == doctor.REPEAT_INTERVAL
     assert doctor.seconds(policy["group_wait"]) <= doctor.LONGEST_GROUP_WAIT
     assert doctor.seconds(group["interval"]) == doctor.EVALUATION_INTERVAL
-    assert group["rules"][0]["uid"] == doctor.RULE_UID
-    assert group["rules"][0]["for"] == doctor.PENDING_PERIOD
-    assert group["rules"][0]["labels"]["service"] == doctor.RULE_SERVICE
-    assert set(group["rules"][0]["labels"]) >= set(doctor.FIELD_MAPPING_LABELS)
+    assert policy["group_by"] == doctor.GROUP_BY
+    assert policy["group_interval"] == doctor.GROUP_INTERVAL
+    actual = {rule["uid"]: rule["for"] for rule in group["rules"]}
+    assert actual == doctor.EXPECTED_RULES == MVP_RULES
+    for rule in group["rules"]:
+        assert rule["labels"]["service"] == doctor.RULE_SERVICE
+        assert rule["labels"]["incident_group"] == doctor.INCIDENT_GROUP
+        assert set(rule["labels"]) >= set(doctor.FIELD_MAPPING_LABELS)
     assert point["receivers"][0]["settings"]["url"] == doctor.RECEIVER_ON_THE_NETWORK
 
 
