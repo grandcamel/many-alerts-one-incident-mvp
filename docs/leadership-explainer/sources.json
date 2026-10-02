@@ -10,7 +10,7 @@
       "docs/mvp-runbook.md"
     ],
     [
-      "Rehearsal evidence and post-fix gaps",
+      "Earlier rehearsal evidence and post-fix gaps \u00b7 1 October 2026",
       "docs/research/demo-run-findings-2026-10-01.md"
     ],
     [
@@ -34,5 +34,12 @@
       "README.md"
     ]
   ],
-  "base": "https://github.com/grandcamel/many-alerts-one-incident-mvp/blob/f910a5b75c493056c3a3404d8cf543559cdaa2d1/"
+  "base": "https://github.com/grandcamel/many-alerts-one-incident-mvp/blob/f910a5b75c493056c3a3404d8cf543559cdaa2d1/",
+  "owner_reported_rehearsal": {
+    "date": "2026-10-02",
+    "attribution": "Owner-reported personal-site rehearsal, 2 October 2026",
+    "source": "Owner-supplied rehearsal facts; not the linked 1 October findings record",
+    "observations": "Owner-reported personal-site rehearsal, 2 October 2026: Sonnet 5.5 received the first Notification at 75 seconds with two Alerts, then updates at 134 and 196 seconds. Traffic restarted on the cue at 209 seconds; the Incident reached Completed with resolution at 291 seconds. Four Runs cost $0.94. Across takes, investigation added approximately 2\u201325 seconds to the create Run: 31.7\u201354.4 seconds versus a 29.3-second baseline. These observations do not establish acceptance of every later fix, every telemetry backend or the unavailable-evidence fallback.",
+    "restart_explanation": "Restart traffic when the sustained-outage update Run finishes. In the recorded Sonnet presenter take, this cue occurred 209 seconds after the stop; unchanged repeats were skipped."
+  }
 }
