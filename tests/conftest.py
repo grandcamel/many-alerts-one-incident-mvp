@@ -62,6 +62,8 @@ BASIC_DEMO_TESTS = frozenset(
         "test_incident_payload.py",
         "test_investigation_flow.py",
         "test_log_formatter.py",
+        "test_loki_query.py",
+        "test_loki_payload.py",
         "test_notification_fixtures.py",
         "test_receiver.py",
         "test_replay.py",

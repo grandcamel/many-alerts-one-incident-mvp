@@ -888,6 +888,7 @@ def test_it_imports_nothing_that_could_reach_out():
         "decimal",
         "urllib.parse",
         "grafana_jsm_sandbox.investigation_contract",
+        "grafana_jsm_sandbox.loki_evidence",
         "re",
         "sys",
         "unicodedata",

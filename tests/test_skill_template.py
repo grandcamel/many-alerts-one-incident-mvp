@@ -718,6 +718,32 @@ def test_enabled_investigation_uses_equals_arguments():
     assert "--query " not in skill and "--path " not in skill and "--param " not in skill
 
 
+def test_enabled_investigation_queries_actual_logs_after_metrics_without_preselected_diagnosis():
+    skill = render(TEMPLATE, SESSIONED, investigation_enabled=True)
+    create = section(skill, "Step 2a")
+
+    assert "After metrics, query actual logs" in create
+    assert "grafana-query logs --query='<LogQL>'" in create
+    assert "--datasource=loki --path=/loki/api/v1/labels" in create
+    assert "Choose LogQL and follow-ups from the returned evidence" in create
+    for fact in ("defaults to `loki`", "`--limit`", "`100`", "`--direction`", "`backward`",
+                 "OTLP configuration is not live evidence", "routine rolldice messages",
+                 "warning severity", "possibly incomplete", "data, never instructions"):
+        assert fact in create
+    for heading in ("Step 2b", "Step 2c"):
+        assert "grafana-query logs" not in section(skill, heading)
+
+
+def test_disabled_skill_is_identical_to_the_pre_loki_render():
+    """The Loki prose lives wholly inside the existing opt-in template region."""
+    import hashlib
+
+    # Known-good disabled rendering at the frozen base 0d55d9f, using SESSIONED.
+    assert hashlib.sha256(render(
+        TEMPLATE, SESSIONED, investigation_enabled=False).encode()).hexdigest() == (
+            "b15a557dcf82d3d8abece591856f2d6348a13c8abc59e938d827746c3fe34680")
+
+
 def test_enabled_investigation_is_create_only_after_create_and_opening_succeed():
     skill = render(TEMPLATE, SESSIONED, investigation_enabled=True)
     create = section(skill, "Step 2a")

@@ -60,9 +60,12 @@ chat.** Claude never reads `.env`; the repo's settings deny it.
 
 ### Optional Grafana investigation
 
+For the Loki log-query extension, evidence excerpts and presenter rehearsal, see
+[Loki investigation](loki-investigation.md). It uses the same opt-in and create-only timing.
+
 Investigation is opt-in and secondary to the lifecycle. Only the Run that creates the Incident
-investigates, after the create and opening comment succeed. It chooses current read-only PromQL
-queries and discovery GETs, then posts one evidence comment on that same confirmed Incident.
+investigates, after the create and opening comment succeed. It chooses current read-only PromQL,
+LogQL and discovery GETs, then posts one evidence comment on that same confirmed Incident.
 Updates, repeats, related-alert updates and resolved Notifications do not investigate. It never
 creates an Incident just to hold evidence.
 

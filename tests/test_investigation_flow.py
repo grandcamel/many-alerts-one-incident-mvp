@@ -44,9 +44,14 @@ jira_as_cli = _jira_as_cli
 VIEWER_TOKEN = "private-viewer-token-for-loopback-only"
 PRESENTER_URL = "http://presenter.example.invalid:3300"
 QUERY = 'sum(rate(http_server_duration_milliseconds_count{service_name="rolldice"}[5m]))'
+LOG_QUERY = '{service_name="rolldice"}'
+LOG_LINE = 'demo is rolling the dice: 4'
 
 
-def scripted_run(jira_as: str, status_open: str, status_in_progress: str, status_done: str) -> None:
+def scripted_run(
+    jira_as: str, status_open: str, status_in_progress: str, status_done: str,
+    with_logs: bool = False,
+) -> None:
     """The child follows the lifecycle branches; it makes no model judgment."""
     working = Path.cwd()
     group = incident_payload.read_group(working / "notification.json")
@@ -151,6 +156,15 @@ def scripted_run(jira_as: str, status_open: str, status_in_progress: str, status
                 output.getvalue(),
                 status != 0,
             )
+            if with_logs:
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    log_status = grafana_query.main([
+                        "logs", "--query=" + LOG_QUERY,
+                        "--start=2023-11-14T22:12:00Z", "--end=2023-11-14T22:14:00Z",
+                    ])
+                tool("grafana-query logs --query='" + LOG_QUERY + "'",
+                     output.getvalue(), log_status != 0)
             [comment] = printed(
                 "investigate",
                 "--key",
@@ -231,7 +245,10 @@ def scripted_run(jira_as: str, status_open: str, status_in_progress: str, status
 
 
 @pytest.mark.parametrize("workflow", WORKFLOWS.values(), ids=lambda workflow: workflow.name)
-@pytest.mark.parametrize("case", ["enabled", "disabled", "unreachable", "401", "timeout"])
+@pytest.mark.parametrize("case", [
+    "enabled", "disabled", "unreachable", "401", "timeout",
+    "loki-success", "loki-empty", "loki-unavailable",
+])
 def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
     case, workflow, jira_as_cli, tmp_path, caplog, monkeypatch
 ):
@@ -261,6 +278,17 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
             upstream.responses.append(
                 (200, json.dumps(response).encode(), 11 if case == "timeout" else 0)
             )
+        if case.startswith("loki-"):
+            if case == "loki-unavailable":
+                upstream.responses.append((503, b"upstream unavailable", 0))
+            else:
+                streams = [] if case == "loki-empty" else [{
+                    "stream": {"service_name": "rolldice", "severity_text": "WARN"},
+                    "values": [["1700000000123456789", LOG_LINE, {"trace_id": "abc123"}]],
+                }]
+                upstream.responses.append((200, json.dumps({
+                    "status": "success", "data": {"resultType": "streams", "result": streams},
+                }).encode(), 0))
         settings = InvestigationSettings.from_environment(
             {
                 "DEMO_INVESTIGATION_ENABLED": "true" if enabled else "false",
@@ -287,7 +315,8 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
             f"import sys; sys.path.insert(0, {str(REPOSITORY)!r}); "
             "from tests.test_investigation_flow import scripted_run; "
             f"scripted_run({jira_as_cli!r}, {project.status_open!r}, "
-            f"{project.status_in_progress!r}, {project.status_done!r})"
+            f"{project.status_in_progress!r}, {project.status_done!r}, "
+            f"with_logs={case.startswith('loki-')!r})"
         )
         with Server(fake) as served:
             forwarder = Forwarder(JiraCredential(served.url, EMAIL, TOKEN))
@@ -389,7 +418,9 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
     assert [path.exists() for path in evidence_files] == [enabled, False, False, False]
     expected_error = {"unreachable": "unreachable", "401": "token_rejected", "timeout": "timeout"}
     if enabled:
-        [record] = [json.loads(line) for line in evidence_files[0].read_text().splitlines()]
+        [record, *log_records] = [
+            json.loads(line) for line in evidence_files[0].read_text().splitlines()
+        ]
         if case in expected_error:
             assert record["status"] == "unavailable"
             assert record["error"]["kind"] == expected_error[case]
@@ -404,6 +435,25 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
             assert record["presenter_link"].startswith(PRESENTER_URL + "/explore?")
             assert "Open in Grafana" in marked[0]
         assert record["query"] == QUERY
+        if case.startswith("loki-"):
+            [log_record] = log_records
+            assert log_record["command"] == "logs"
+            assert log_record["query"] == LOG_QUERY
+            if case == "loki-success":
+                assert log_record["status"] == "ok"
+                assert LOG_LINE in marked[0]
+                assert "1700000000123456789" in marked[0]
+                assert "rolldice" in marked[0]
+            elif case == "loki-empty":
+                assert log_record["status"] == "empty"
+                assert LOG_LINE not in marked[0]
+                assert "no data" in marked[0].lower() or "no log" in marked[0].lower()
+            else:
+                assert log_record["status"] == "unavailable"
+                assert "HTTP 503" in marked[0]
+            assert "investigation recorded" in finishes[0]  # metric evidence remains usable
+        else:
+            assert log_records == []
     else:
         assert "investigation" not in finishes[0]
         assert json.loads((directories[0] / "run-details.json").read_text())["argv"] == command[1:]
@@ -411,13 +461,17 @@ def test_investigation_does_not_change_the_lifecycle_or_its_run_count(
             json.loads((directory / "run-details.json").read_text())["grafana_variables"] == []
             for directory in directories
         )
-    assert len(upstream.received) == int(enabled and case != "unreachable")
-    for request in upstream.received:
+    assert len(upstream.received) == int(enabled and case != "unreachable") + int(case.startswith("loki-"))
+    for index, request in enumerate(upstream.received):
         assert request.method == "GET" and request.body == b""
         assert request.headers["Authorization"] == "Bearer " + VIEWER_TOKEN
         parsed = urlsplit(request.path)
-        assert parsed.path == "/api/datasources/proxy/uid/prometheus/api/v1/query"
-        assert parse_qs(parsed.query)["query"] == [QUERY]
+        if index == 0:
+            assert parsed.path == "/api/datasources/proxy/uid/prometheus/api/v1/query"
+            assert parse_qs(parsed.query)["query"] == [QUERY]
+        else:
+            assert parsed.path == "/api/datasources/proxy/uid/loki/loki/api/v1/query_range"
+            assert parse_qs(parsed.query)["query"] == [LOG_QUERY]
     saved = "".join(path.read_text() for directory in directories for path in directory.iterdir())
     assert VIEWER_TOKEN not in caplog.text + saved + repr(settings) + repr(spawner)
     assert TOKEN not in caplog.text + saved
