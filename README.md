@@ -13,6 +13,8 @@ the Incident is Completed, with the trend commented in between. It was built as 
 sandboxed boundary looks like when the audience may ask what else the Run can reach, and
 [the MVP runbook](docs/mvp-runbook.md) is the presenter's script.
 
+For an engineering leadership overview, see the [visual MVP explainer](docs/leadership-explainer/README.md), with an interactive lifecycle and a printable briefing.
+
 ## Quickstart
 
 From a clean clone to one Incident's whole lifecycle on your own Atlassian site, and a clean
