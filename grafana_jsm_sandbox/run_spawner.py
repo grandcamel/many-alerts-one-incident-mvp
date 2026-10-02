@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import secrets
 import signal
 import subprocess
@@ -47,7 +48,6 @@ from grafana_jsm_sandbox.log_formatter import (
     LIMIT,
     RETRY,
     format_stream,
-    redact,
     redact_stderr_chunks,
     run_failure,
 )
@@ -273,30 +273,31 @@ class RunSpawner:
         )
         deadline = time.monotonic() + self.timeout
         # Both pipes were asked for above, so neither of them is None.
+        stdout = _Stdout(cast("IO[str]", process.stdout), stdout_done)
         errors = _Drained(cast("IO[str]", process.stderr), active_secrets=active_secrets)
         killer = threading.Timer(
             max(0, deadline - time.monotonic()),
             _kill,
-            (process, timed_out, stdout_done, errors.done),
+            (process, timed_out, stdout_done, errors.pipe_done),
         )
         killer.start()
         with process:
             try:
                 with transcript:
-                    stream = transcript.tee(cast("IO[str]", process.stdout))
+                    stream = transcript.tee(stdout)
                     for line in format_stream(stream, active_secrets=active_secrets):
                         logger.log(LEVELS.get(line.split(" ", 1)[0], logging.INFO), "%s", line)
-                    stdout_done.set()
             except BaseException:
                 # Do not let context-manager reaping wait forever if consuming
                 # the Transcript fails while the Run or its children are alive.
-                _kill(process, timed_out, stdout_done, errors.done)
+                _kill(process, timed_out, stdout_done, errors.pipe_done)
                 raise
             finally:
                 # Keep the deadline armed while stderr is held by descendants,
                 # too. Closing its file in Popen.__exit__ before the reader ends
                 # would wait for the read lock after timeout protection stopped.
                 errors.done.wait()
+                stdout.join()
                 # Join an already-running callback before wait() can release the
                 # session leader's PID. A descendant holding either pipe must never
                 # make the callback reap that leader before signalling its group.
@@ -307,7 +308,7 @@ class RunSpawner:
             except subprocess.TimeoutExpired:
                 # Closing stdout alone does not finish a still-running parent;
                 # this wait shares the deadline instead of starting a new budget.
-                _kill(process, timed_out, stdout_done, errors.done)
+                _kill(process, timed_out, stdout_done, errors.pipe_done)
                 exit_status = process.wait()
         errors.join(STDERR_TIMEOUT)
 
@@ -316,7 +317,8 @@ class RunSpawner:
                 "run %s exceeded its %.0fs timeout and was killed", run.run_id, self.timeout
             )
         if exit_status != 0 and errors.text:
-            logger.warning("run %s wrote to stderr: %s", run.run_id, redact(errors.text, active_secrets=active_secrets))
+            # The drain already sanitized the stream before selecting its tail.
+            logger.warning("run %s wrote to stderr: %s", run.run_id, errors.text)
         return RunOutcome(exit_status, self._failure(timed_out, transcript, exit_status))
 
     def _failure(
@@ -428,6 +430,38 @@ class _Transcript:
             self.failure = self.failure or run_failure(event, active_secrets=self._active_secrets)
 
 
+class _Stdout:
+    """Read pipe EOF independently of formatting, without changing the raw lines.
+
+    The deadline covers the child and inherited pipes, not work in the presenter.
+    Queueing lets the reader observe EOF even while a long event is being shown.
+    """
+
+    def __init__(self, stream: IO[str], done: threading.Event):
+        self._lines: queue.SimpleQueue[str | BaseException | None] = queue.SimpleQueue()
+        self._thread = threading.Thread(target=self._read, args=(stream, done), daemon=True)
+        self._thread.start()
+
+    def _read(self, stream: IO[str], done: threading.Event) -> None:
+        try:
+            for line in stream:
+                self._lines.put(line)
+            done.set()
+        except BaseException as error:  # noqa: BLE001 - propagate reader failures to the caller
+            self._lines.put(error)
+        finally:
+            self._lines.put(None)
+
+    def __iter__(self) -> Iterator[str]:
+        while (line := self._lines.get()) is not None:
+            if isinstance(line, BaseException):
+                raise line
+            yield line
+
+    def join(self) -> None:
+        self._thread.join()
+
+
 class _Drained:
     """A stream being read to its end on a thread, so a full pipe can never wedge a Run.
 
@@ -438,6 +472,7 @@ class _Drained:
     def __init__(self, stream: IO[str], *, active_secrets: tuple[str, ...] = ()):
         self.text = ""
         self.done = threading.Event()
+        self.pipe_done = threading.Event()
         self._active_secrets = active_secrets
         self._thread = threading.Thread(target=self._read, args=(stream,), daemon=True)
         self._thread.start()
@@ -448,8 +483,13 @@ class _Drained:
             # Trailing whitespace might be arbitrarily long: keep it separately until
             # a later non-whitespace character makes it interior, or discard it at EOF.
             tail = pending = ""
-            chunks = iter(lambda: stream.read(8192), "")
-            for chunk in redact_stderr_chunks(chunks, active_secrets=self._active_secrets):
+
+            def chunks():
+                while chunk := stream.read(8192):
+                    yield chunk
+                self.pipe_done.set()
+
+            for chunk in redact_stderr_chunks(chunks(), active_secrets=self._active_secrets):
                 significant = chunk.rstrip()
                 if significant:
                     text = tail + pending + significant if tail else significant.lstrip()
@@ -477,7 +517,7 @@ def _kill(
     only the parent would leave the Receiver waiting for a pipe that never closes.
     """
     if stdout_done.is_set() and stderr_done.is_set() and process.poll() is not None:
-        # Both readers done and an exited parent mean genuine completion. Poll
+        # Both pipes at EOF and an exited parent mean genuine completion. Poll
         # may reap here only because no group signal follows. While either pipe
         # remains open, retain the leader's PID even after its exit: its original
         # group can still contain descendants holding the inherited pipes.

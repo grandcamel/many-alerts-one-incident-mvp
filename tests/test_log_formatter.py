@@ -15,6 +15,7 @@ import json
 import secrets
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 
 import pytest
@@ -88,6 +89,104 @@ def tool_result_event(content, is_error: bool = False) -> dict:
             ],
         },
     }
+
+
+def long_tool_output(kind: str) -> str:
+    if kind == "plain":
+        return "x" * 200_000
+    if kind == "key-name":
+        return "token" * 40_000
+    if kind == "flag-name":
+        return "--" + "token" * 40_000
+    if kind == "assignment-chain":
+        return "label=" * 40_000
+    if kind == "opaque-digits":
+        return "1" * 200_000
+    if kind == "whitespace":
+        return "Authorization:" + " " * 200_000
+    record = {"key": "value", "url": "https://lgtm.invalid/api/query?key=label"}
+    record.update({f"token_key_secret_label_{i}": "value" for i in range(6000)})
+    return json.dumps(record, separators=(",", ":"))
+
+
+@pytest.mark.parametrize("kind", [
+    "plain", "json", "key-name", "flag-name", "assignment-chain", "opaque-digits", "whitespace",
+])
+def test_large_tool_output_formats_well_under_a_second(kind):
+    # Keep a quadratic regression from pinning the suite in a regex for minutes.
+    code = """
+import json, sys, time
+from tests.test_log_formatter import long_tool_output, tool_result_event
+from grafana_jsm_sandbox.log_formatter import format_event
+event = tool_result_event(long_tool_output(sys.argv[1]))
+start = time.perf_counter()
+lines = format_event(event)
+print(json.dumps([time.perf_counter() - start, lines]))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, kind], capture_output=True, text=True,
+        timeout=2, check=True,
+    )
+    elapsed, lines = json.loads(result.stdout)
+    assert elapsed < 0.5
+    assert len(lines) == 1 and lines[0].startswith("[out]    ") and lines[0].endswith("...")
+
+
+def test_large_tool_output_redacts_supplied_values_before_trimming():
+    values = ("sentinel-private-value", "model-private-value", "viewer-private-value")
+    body = " ".join(values) + " " + "x" * 200_000 + " " + " ".join(values)
+    start = time.perf_counter()
+    rendered = "\n".join(format_event(tool_result_event(body), active_secrets=values))
+    assert time.perf_counter() - start < 0.5
+    assert rendered.startswith("[out]    <redacted> <redacted> <redacted> ")
+    for value in values:
+        assert_no_secret_fragment(rendered, value)
+
+
+def test_tool_output_is_sanitized_only_once(monkeypatch):
+    from grafana_jsm_sandbox import log_formatter
+
+    original = log_formatter.redact
+    inputs = []
+
+    def record(text, **kwargs):
+        inputs.append(text)
+        return original(text, **kwargs)
+
+    monkeypatch.setattr(log_formatter, "redact", record)
+    body = "safe output " + "x" * 200_000
+    format_event(tool_result_event(body))
+    assert inputs == [body]
+
+
+@pytest.mark.parametrize("text", [
+    'url="https://lgtm.invalid/query?api_key=private-value"',
+    "--label=https://lgtm.invalid/query?token=private-value",
+    "label=label=label=secret=private-value",
+])
+def test_nonsecret_names_do_not_hide_nested_credential_assignments(text):
+    redacted = redact(text)
+    assert "private-value" not in redacted
+    assert "<redacted>" in redacted
+
+
+def test_ordinary_presenter_lines_match_main():
+    # Literal expectations captured from f910a5b, including all five presenter cues.
+    events = [
+        bash_event("grafana-query loki --query '{service=\"checkout\"}'"),
+        tool_result_event("First line\n" + "x" * 220),
+        tool_result_event("query refused", is_error=True),
+        assistant_event([{"type": "text", "text": "OPS-41 is the Match."}]),
+        result_event(),
+    ]
+    assert [line for event in events for line in format_event(event)] == [
+        '[tool]   Bash: grafana-query loki --query \'{service="checkout"}\'',
+        "[out]    First line",
+        "[out]    " + "x" * 200 + "...",
+        "[err]    query refused",
+        "[claude] OPS-41 is the Match.",
+        "[result] success in 1.5s, 2 turns, $0.1000",
+    ]
 
 
 def result_event(**fields) -> dict:

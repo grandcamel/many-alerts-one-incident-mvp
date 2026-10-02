@@ -449,6 +449,62 @@ def test_the_transcript_is_rendered_into_the_log(forwarder, run, caplog):
     assert "[result] success in 1.2s" in caplog.text
 
 
+@pytest.mark.parametrize("kind", ["plain", "json"])
+def test_a_successful_child_with_large_tool_output_meets_a_short_deadline(run, caplog, kind):
+    from tests.test_log_formatter import long_tool_output
+
+    body = long_tool_output(kind)
+    # Pass a small generator to the child rather than a 200 KB argv entry.
+    source = (
+        "body = 'x' * 200_000" if kind == "plain" else
+        "record = {'key': 'value', 'url': 'https://lgtm.invalid/api/query?key=label'}\n"
+        "record.update({f'token_key_secret_label_{i}': 'value' for i in range(6000)})\n"
+        "body = json.dumps(record, separators=(',', ':'))"
+    )
+    program = _program(
+        "import json", source,
+        "print(json.dumps({'type': 'user', 'message': {'content': "
+        "[{'type': 'tool_result', 'content': body}]}}), flush=True)",
+        EMIT_A_TRANSCRIPT,
+    )
+    caplog.set_level(logging.INFO)
+    started = time.monotonic()
+    outcome = spawner_for(program, InvestigationForwarder(), timeout=0.5)(run)
+    assert time.monotonic() - started < 0.5
+    assert (outcome.exit_status, outcome.failure) == (0, None)
+    assert "[out]    " in caplog.text
+    assert "[result] success in 1.2s, 2 turns" in caplog.text
+    event = json.loads(run.transcript_path.read_text().splitlines()[0])
+    assert event["message"]["content"][0]["content"] == body
+
+
+def test_slow_presentation_does_not_turn_a_successful_child_into_a_timeout(run, monkeypatch):
+    original_format = run_spawner.format_stream
+
+    def slow_format(stream, **kwargs):
+        for line in original_format(stream, **kwargs):
+            time.sleep(0.3)
+            yield line
+
+    monkeypatch.setattr(run_spawner, "format_stream", slow_format)
+    outcome = spawner_for(_program(EMIT_A_TRANSCRIPT), InvestigationForwarder(), timeout=0.2)(run)
+    assert (outcome.exit_status, outcome.failure) == (0, None)
+
+
+def test_slow_stderr_sanitizing_does_not_count_as_an_open_pipe(run, monkeypatch):
+    original_redact = run_spawner.redact_stderr_chunks
+
+    def slow_redact(chunks, **kwargs):
+        # Consume through EOF, then deliberately delay the local projection.
+        chunks = list(chunks)
+        time.sleep(0.3)
+        yield from original_redact(chunks, **kwargs)
+
+    monkeypatch.setattr(run_spawner, "redact_stderr_chunks", slow_redact)
+    outcome = spawner_for(_program(EMIT_A_TRANSCRIPT), InvestigationForwarder(), timeout=0.2)(run)
+    assert (outcome.exit_status, outcome.failure) == (0, None)
+
+
 def test_the_runs_exit_status_is_returned(forwarder, run):
     assert spawner_for(_program(COMPLAIN_AND_FAIL), forwarder)(run).exit_status == 3
 

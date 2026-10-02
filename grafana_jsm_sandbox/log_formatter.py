@@ -16,8 +16,8 @@ begin its final message with `failed:`. Claude Code ends that Run `success`, wit
 status 0, because the Run did finish, so the line is read here: it is the only way the log
 and the Receiver learn that the Incident is not what the audience was shown.
 
-Every line goes through `redact` on the way out, and printable source text is
-sanitized before shortening. Live projection also supplies the known active
+Printable source text goes through `redact` once, before any shortening or
+line selection. Live projection also supplies the known active
 secret values; saved Transcripts retain the credential-shape fallback. A Run only
 ever holds a sentinel, never the real Jira token (ADR 0002), but the log window is on a screen
 in front of an audience, so anything credential-shaped is replaced before it can
@@ -87,48 +87,85 @@ REPORTED_FAILURE_REASON = "run reported failed"
 terminal reason."""
 
 _CREDENTIAL_WORD = r"token|password|passwd|secret|api[_-]?key|credential"
-_QUOTE = r"['\"]?"
-_VALUE = r"[^\s'\"]+"
+_QUOTE = r"['\"]?+"
+_VALUE = r"[^\s'\"]++"
+_ASSIGNMENT_VALUE = re.compile(r"[^\s\"',;}]++")
+_FLAG_VALUE = re.compile(_VALUE)
+_CREDENTIAL_NAME = re.compile(_CREDENTIAL_WORD, re.IGNORECASE)
 
 _REDACTIONS = (
     # An Authorization header, whatever scheme it names. The scheme is swallowed
     # along with the credential, because a scheme this does not recognise is
     # precisely the case that used to publish the secret next to it.
     (
-        re.compile(rf"(?i)\bauthorization\b\s*[:=]\s*(?:[A-Za-z][\w.-]*\s+)?{_VALUE}"),
+        re.compile(rf"(?i)\bauthorization\b\s*+[:=]\s*+(?:[A-Za-z][\w.-]*+\s++)?{_VALUE}"),
         f"Authorization: {REDACTED}",
     ),
     # A bare basic/bearer credential not attached to a header name.
-    (re.compile(r"(?i)\b(basic|bearer)\s+[A-Za-z0-9+/=_.\-]{8,}"), rf"\1 {REDACTED}"),
+    (re.compile(r"(?i)\b(basic|bearer)\s++[A-Za-z0-9+/=_.\-]{8,}+"), rf"\1 {REDACTED}"),
     # curl's basic-auth flag, whose value is a whole user:secret pair.
-    (re.compile(rf"(?i)(\s-u\s+|--user[=\s]+)({_QUOTE}){_VALUE}"), rf"\1\2{REDACTED}"),
+    (re.compile(rf"(?i)(\s-u\s++|--user[=\s]++)({_QUOTE}){_VALUE}"), rf"\1\2{REDACTED}"),
     # A command-line flag whose name says it carries a credential.
     (
-        re.compile(rf"(?i)(--?[a-z\-]*(?:{_CREDENTIAL_WORD})[a-z\-]*[=\s]+)({_QUOTE}){_VALUE}"),
-        rf"\1\2{REDACTED}",
+        re.compile(
+            rf"(?i)(?<![a-z_\-])(--?+(?P<flag>[a-z_\-]++)[=\s]++)"
+            rf"({_QUOTE})"
+        ),
+        rf"\1\3{REDACTED}",
     ),
     # An assignment to a credential-named key, in a shell, an env file or JSON.
     (
         re.compile(
-            rf"(?i)(\"?[\w.\-]*(?:{_CREDENTIAL_WORD})[\w.\-]*\"?\s*[:=]\s*)"
-            rf"({_QUOTE})[^\s\"',;}}]+"
+            rf"(?i)(?<![\w.\-])(\"?+(?P<key>[\w.\-]++)\"?+\s*+[:=]\s*+)"
+            rf"({_QUOTE})"
         ),
-        rf"\1\2{REDACTED}",
+        rf"\1\3{REDACTED}",
     ),
     # A credential word followed by an opaque value, as netrc and prompts write
     # it. The length gate is what keeps prose ("the token is a sentinel") intact.
-    (re.compile(rf"(?i)\b({_CREDENTIAL_WORD})(\s+)[^\s'\"]{{16,}}"), rf"\1\2{REDACTED}"),
+    (re.compile(rf"(?i)\b({_CREDENTIAL_WORD})(\s++)[^\s'\"]{{16,}}+"), rf"\1\2{REDACTED}"),
     # Credentials that announce themselves by prefix, wherever they appear.
-    (re.compile(r"(?i)\b(?:ATATT|ATCTT|sk-ant-)[A-Za-z0-9+/=_.\-]{8,}"), REDACTED),
+    (re.compile(r"(?i)\b(?:ATATT|ATCTT|sk-ant-)[A-Za-z0-9+/=_.\-]{8,}+"), REDACTED),
     # A long opaque run of letters and digits with nothing around it to say what
     # it is: a sentinel echoed on its own looks like this and nothing else here
     # does. Requiring a digit keeps long words out; allowing no punctuation keeps
     # Fingerprints, issue keys, URLs, UUIDs and timestamps out.
     (
-        re.compile(r"\b(?=[A-Za-z0-9]*[0-9])(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{32,}\b"),
+        re.compile(r"\b(?P<opaque>[A-Za-z0-9]{32,}+)\b"),
         REDACTED,
     ),
 )
+
+
+def _redaction_matches(
+    pattern: re.Pattern[str], replacement: str, text: str, start: int = 0
+) -> Iterator[tuple[int, int, str]]:
+    """Scan complete tokens once, then classify their credential names.
+
+    Token boundaries prevent failed key matches restarting inside a long word;
+    possessive quantifiers prevent retries within each token. Classification
+    uses fixed prefixes, so both passes are linear even for repeated `token`s.
+    """
+    # Classify the name before scanning its value. Skipping a nonsecret value
+    # would miss nested assignments in URLs; scanning each such suffix first
+    # would make chains like `label=label=...` quadratic again.
+    at = start
+    while match := pattern.search(text, at):
+        at = match.end()
+        if "key" in pattern.groupindex or "flag" in pattern.groupindex:
+            name = "key" if "key" in pattern.groupindex else "flag"
+            if not _CREDENTIAL_NAME.search(match[name]):
+                continue
+            value_pattern = _ASSIGNMENT_VALUE if name == "key" else _FLAG_VALUE
+            value = value_pattern.match(text, at)
+            if value is None:
+                continue
+            at = value.end()
+        if "opaque" in pattern.groupindex:
+            value = match["opaque"]
+            if not re.search(r"[0-9]", value) or not re.search(r"[A-Za-z]", value):
+                continue
+        yield match.start(), at, match.expand(replacement)
 
 
 def redact(text: str, *, active_secrets: tuple[str, ...] = ()) -> str:
@@ -139,7 +176,14 @@ def redact(text: str, *, active_secrets: tuple[str, ...] = ()) -> str:
     for secret in sorted(set(active_secrets) - {""}, key=len, reverse=True):
         text = text.replace(secret, REDACTED)
     for pattern, replacement in _REDACTIONS:
-        text = pattern.sub(replacement, text)
+        parts = []
+        at = 0
+        for start, end, rendered in _redaction_matches(pattern, replacement, text):
+            parts.extend((text[at:start], rendered))
+            at = end
+        if parts:
+            parts.append(text[at:])
+            text = "".join(parts)
     return text
 
 
@@ -165,7 +209,7 @@ def redact_stderr_chunks(
     guards = (
         re.compile(r"(?i)authorization"), re.compile(r"(?i)basic|bearer"),
         re.compile(r"(?i)-u|--user"), re.compile(rf"(?i){_CREDENTIAL_WORD}"),
-        re.compile(rf'(?i)(?:{_CREDENTIAL_WORD})[\w.\-]*"?\s*[:=]'),
+        _CREDENTIAL_NAME,
         re.compile(rf"(?i){_CREDENTIAL_WORD}"),
         re.compile(r"(?i)ATATT|ATCTT|sk-ant-"), re.compile(r"[0-9]"),
     )
@@ -193,10 +237,13 @@ def redact_stderr_chunks(
             cut = len(pending) - 8192
             view = context + pending
             offset = len(context)
-            matches = list(pattern.finditer(view, offset)) if guard.search(pending) else []
+            matches = (
+                list(_redaction_matches(pattern, replacement, view, offset))
+                if guard.search(pending) else []
+            )
             open_value = False
-            for match in matches:
-                start, end = match.start() - offset, match.end() - offset
+            for match_start, match_end, _ in matches:
+                start, end = match_start - offset, match_end - offset
                 if start >= cut:
                     break
                 if end > cut:
@@ -207,11 +254,11 @@ def redact_stderr_chunks(
             # again on a detached prefix would invent word boundaries at either end.
             parts = []
             at = offset
-            for match in matches:
-                if match.end() > cut + offset:
+            for start, end, rendered in matches:
+                if end > cut + offset:
                     break
-                parts.extend((view[at:match.start()], match.expand(replacement)))
-                at = match.end()
+                parts.extend((view[at:start], rendered))
+                at = end
             parts.append(view[at:cut + offset])
             yield "".join(parts)
             context = pending[cut - 1]
@@ -222,9 +269,9 @@ def redact_stderr_chunks(
             at = len(context)
             parts = []
             if guard.search(pending):
-                for match in pattern.finditer(view, at):
-                    parts.extend((view[at:match.start()], match.expand(replacement)))
-                    at = match.end()
+                for start, end, rendered in _redaction_matches(pattern, replacement, view, at):
+                    parts.extend((view[at:start], rendered))
+                    at = end
             parts.append(view[at:])
             yield "".join(parts)
 
@@ -249,13 +296,17 @@ def format_event(event: object, *, active_secrets: tuple[str, ...] = ()) -> list
         kind = event.get("type")
         render = _RENDERERS.get(kind) if isinstance(kind, str) else None
         if render is None:
-            lines = [_line(DIAGNOSTIC, f"unrecognised event type {kind!r}")]
+            lines = [_line(DIAGNOSTIC, redact(
+                f"unrecognised event type {kind!r}", active_secrets=active_secrets
+            ))]
         else:
             try:
                 lines = render(event, active_secrets=active_secrets)
             except Exception:  # noqa: BLE001 - malformed events must not crash logging
-                lines = [_line(DIAGNOSTIC, f"{kind!r} event could not be rendered")]
-    return [redact(line, active_secrets=active_secrets) for line in lines]
+                lines = [_line(DIAGNOSTIC, redact(
+                    f"{kind!r} event could not be rendered", active_secrets=active_secrets
+                ))]
+    return lines
 
 
 def format_stream(
@@ -283,24 +334,28 @@ def _render_system(event: dict, *, active_secrets: tuple[str, ...] = ()) -> list
         return [
             _line(
                 RUN,
-                _truncated(
+                _truncated(redact(
                     f"model={event.get('model', 'unknown')} "
                     f"permission-mode={event.get('permissionMode', 'unknown')} "
                     f"tools={','.join(str(tool) for tool in tools)}",
                     active_secrets=active_secrets,
-                ),
+                )),
             )
         ]
     if subtype == "permission_denied":
         tool_name = event.get("tool_name", "a tool")
-        reason = _first_sentence(event.get("message") or "", active_secrets=active_secrets)
+        reason = _first_sentence(redact(event.get("message") or "", active_secrets=active_secrets))
         if not reason:
-            reason = f"denied ({event.get('decision_reason_type', 'no reason given')})"
-        return [_line(DENIED, _truncated(f"{tool_name}: {reason}", active_secrets=active_secrets))]
+            reason = redact(
+                f"denied ({event.get('decision_reason_type', 'no reason given')})",
+                active_secrets=active_secrets,
+            )
+        tool_name = redact(str(tool_name), active_secrets=active_secrets)
+        return [_line(DENIED, _truncated(f"{tool_name}: {reason}"))]
     if subtype == "api_retry":
         # A Run that goes quiet while Claude Code retries the API looks stuck.
         # This line is what says it is waiting, and on what.
-        return [_line(RETRY, _truncated(_retry(event), active_secrets=active_secrets))]
+        return [_line(RETRY, _truncated(redact(_retry(event), active_secrets=active_secrets)))]
     # Everything else a system event carries is progress chatter the audience
     # does not need: task summaries, turn summaries, and whatever is added next.
     return []
@@ -346,9 +401,11 @@ def _render_assistant(event: dict, *, active_secrets: tuple[str, ...] = ()) -> l
                 if line.strip()
             )
         elif kind == "tool_use":
-            call = _tool_call(block.get("name"), block.get("input"))
+            call = redact(
+                _tool_call(block.get("name"), block.get("input")), active_secrets=active_secrets
+            )
             lines.extend(
-                _line(TOOL, text) for text in _trimmed_lines(call, active_secrets=active_secrets)
+                _line(TOOL, text) for text in _trimmed_lines(call)
             )
     return lines
 
@@ -400,21 +457,27 @@ def _render_result(event: dict, *, active_secrets: tuple[str, ...] = ()) -> list
     # failed Run ends on its hint instead, which belongs directly under the
     # failure it explains.
     lines = [
-        _line(DENIED, _tool_call(denial.get("tool_name"), denial.get("tool_input")))
+        _line(DENIED, redact(
+            _tool_call(denial.get("tool_name"), denial.get("tool_input")),
+            active_secrets=active_secrets,
+        ))
         for denial in event.get("permission_denials") or []
         if isinstance(denial, dict)
     ]
     failure = _failure(event, active_secrets=active_secrets)
     if failure is not None:
-        lines.append(_line(FAILED, _truncated(failure, active_secrets=active_secrets)))
+        lines.append(_line(FAILED, _truncated(failure)))
         # A failure the Run reports is about Jira and the Incident, whatever its words: a
         # "rate limit" in it is not the Claude account's, so no hint for the account.
         hint = _hint(event) if _api_failed(event) else None
         if hint is not None:
-            lines.append(_line(HINT, hint))
+            lines.append(_line(HINT, redact(hint, active_secrets=active_secrets)))
         return lines
     lines.append(
-        _line(RESULT, f"{event.get('subtype', 'finished')} in {duration}{turns_text}{cost_text}")
+        _line(RESULT, redact(
+            f"{event.get('subtype', 'finished')} in {duration}{turns_text}{cost_text}",
+            active_secrets=active_secrets,
+        ))
     )
     return lines
 
@@ -445,7 +508,7 @@ def _render_rate_limit(event: dict, *, active_secrets: tuple[str, ...] = ()) -> 
     if isinstance(resets, (int, float)):
         moment = datetime.fromtimestamp(resets, tz=UTC)
         text += f", resets {moment:%Y-%m-%d %H:%M} UTC"
-    return [_line(LIMIT, _truncated(text, active_secrets=active_secrets))]
+    return [_line(LIMIT, _truncated(redact(text, active_secrets=active_secrets)))]
 
 
 _RENDERERS = {
@@ -473,7 +536,7 @@ def run_failure(event: object, *, active_secrets: tuple[str, ...] = ()) -> str |
     if not isinstance(event, dict) or event.get("type") != "result":
         return None
     failure = _failure(event, active_secrets=active_secrets)
-    return None if failure is None else _truncated(failure, active_secrets=active_secrets)
+    return None if failure is None else _truncated(failure)
 
 
 def _api_failed(event: dict) -> bool:
@@ -493,7 +556,10 @@ def _failure(event: dict, *, active_secrets: tuple[str, ...] = ()) -> str | None
     if not _api_failed(event):
         reported = _reported_failure(event, active_secrets=active_secrets)
         return None if reported is None else f"{REPORTED_FAILURE_REASON}: {reported}"
-    reason = event.get("terminal_reason") or event.get("subtype") or "unknown"
+    reason = redact(
+        str(event.get("terminal_reason") or event.get("subtype") or "unknown"),
+        active_secrets=active_secrets,
+    )
     return f"{reason}: {_failure_text(event, active_secrets=active_secrets)}"
 
 
@@ -657,9 +723,8 @@ def _as_text(content: object) -> str:
     return "" if content is None else str(content)
 
 
-def _trimmed_lines(text: str, *, active_secrets: tuple[str, ...] = ()) -> list[str]:
-    """The first few lines of `text`, with a count of the ones left behind."""
-    text = redact(text, active_secrets=active_secrets)
+def _trimmed_lines(text: str) -> list[str]:
+    """Select from already redacted text, with a count of the lines left behind."""
     lines = [line for line in text.splitlines() if line.strip()]
     kept = lines[:TRIM_LINES]
     remaining = len(lines) - len(kept)
@@ -668,13 +733,13 @@ def _trimmed_lines(text: str, *, active_secrets: tuple[str, ...] = ()) -> list[s
     return kept
 
 
-def _truncated(text: str, *, active_secrets: tuple[str, ...] = ()) -> str:
-    text = redact(text, active_secrets=active_secrets)
+def _truncated(text: str) -> str:
+    """Shorten already redacted text; never run credential scans after clipping."""
     return text if len(text) <= TRIM_CHARS else text[:TRIM_CHARS] + "..."
 
 
-def _first_sentence(text: str, *, active_secrets: tuple[str, ...] = ()) -> str:
-    return re.split(r"(?<=\.)\s", redact(text, active_secrets=active_secrets).strip(), maxsplit=1)[0]
+def _first_sentence(text: str) -> str:
+    return re.split(r"(?<=\.)\s", text.strip(), maxsplit=1)[0]
 
 
 def _line(label: str, text: str) -> str:
