@@ -159,6 +159,57 @@ def environment_of(run: Run) -> dict[str, str]:
     return json.loads((run.working_directory / ENVIRONMENT_FILE).read_text())
 
 
+class InvestigationForwarder:
+    """The spawner's sentinel interface, without a listening socket."""
+
+    url = "http://127.0.0.1:8099"
+
+    def set_sentinel(self, sentinel, create_fields=None):
+        pass
+
+    def clear_sentinel(self):
+        pass
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_investigation_environment_reaches_the_child_only_when_supplied(
+    run, monkeypatch, caplog, enabled
+):
+    additions = {
+        "DEMO_INVESTIGATION_ENABLED": "true",
+        "DEMO_GRAFANA_URL": "http://lgtm:3000",
+        "DEMO_GRAFANA_PRESENTER_URL": "http://localhost:3300",
+        "DEMO_GRAFANA_VIEWER_TOKEN": "viewer-token-private",
+    }
+    for variable, value in additions.items():
+        monkeypatch.setenv(variable, value)
+    monkeypatch.setattr(run_spawner.secrets, "token_urlsafe", lambda size: "same-sentinel")
+    caplog.set_level(logging.INFO)
+    base = spawner_for(
+        _program(DUMP_ENVIRONMENT, EMIT_A_TRANSCRIPT), InvestigationForwarder(), trust_store={}
+    )
+    spawner = spawner_for(
+        base.command,
+        base.forwarder,
+        trust_store={},
+        investigation_environment=additions if enabled else {},
+    )
+
+    assert spawner._environment("same-sentinel") == {
+        **base._environment("same-sentinel"),
+        **(additions if enabled else {}),
+    }
+    outcome = spawner(run)
+    assert outcome.exit_status == 0 and outcome.failure is None
+    environment = environment_of(run)
+    expected = base._environment("same-sentinel") | (additions if enabled else {})
+    assert {
+        name: value for name, value in environment.items() if name not in PLATFORM_ADDITIONS
+    } == expected
+    assert "viewer-token-private" not in repr(spawner) + caplog.text
+    assert "investigation_environment" not in repr(spawner)
+
+
 @pytest.fixture
 def run(tmp_path) -> Run:
     return a_run(tmp_path / "runs")

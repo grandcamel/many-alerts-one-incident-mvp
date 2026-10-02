@@ -3,14 +3,16 @@
 Everything the demo needs in one process (ADR 0001). The Forwarder is a thread
 inside it holding the real Jira credential; the Receiver listens for Grafana's
 Notifications; each Notification becomes a child process started by the spawner
-with a sentinel where that credential would be.
+with a sentinel where that credential would be. When investigation is enabled,
+the Run also holds a Grafana Viewer token for read-only queries.
 
     python3 -m grafana_jsm_sandbox
 
 It reads its whole configuration from the environment, which compose fills from
 `.env`, and refuses to start without a Jira credential, exactly one model
 credential (an Anthropic API key or a Claude Code OAuth token) and the demo's
-project key, naming everything that is missing at once, because a
+project key, plus valid Grafana settings when investigation is enabled,
+naming everything that is missing at once, because a
 container that starts and quietly does nothing is only found out when an Alert
 fires in front of an audience.
 
@@ -36,11 +38,16 @@ import os
 import sys
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeVar
 
-from grafana_jsm_sandbox.demo_config import DemoProject, IncompleteDemoProject
+from grafana_jsm_sandbox.demo_config import (
+    ConfigurationError,
+    DemoProject,
+    IncompleteDemoProject,
+    InvestigationSettings,
+)
 from grafana_jsm_sandbox.forwarder import Forwarder, IncompleteJiraCredential, JiraCredential
 from grafana_jsm_sandbox.nondumpable import refuse_to_be_read
 from grafana_jsm_sandbox.receiver import Receiver
@@ -131,6 +138,7 @@ class Settings:
     run_model: str = DEFAULT_MODEL
     run_budget_usd: float | None = None
     run_settle_seconds: float = DEFAULT_RUN_SETTLE_SECONDS
+    investigation: InvestigationSettings = field(default_factory=InvestigationSettings)
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> Settings:
@@ -141,7 +149,7 @@ class Settings:
         """
         environment = os.environ if environment is None else environment
         failures: list[str] = []
-        credential = model_credential = project = None
+        credential = model_credential = project = investigation = None
         try:
             credential = JiraCredential.from_environment(environment)
         except IncompleteJiraCredential as failure:
@@ -154,6 +162,10 @@ class Settings:
             project = DemoProject.from_environment(environment)
         except IncompleteDemoProject as failure:
             failures.append(str(failure))
+        try:
+            investigation = InvestigationSettings.from_environment(environment)
+        except ConfigurationError as failure:
+            failures.append(str(failure))
         port = _number(environment, PORT_VARIABLE, DEFAULT_PORT, int, failures)
         run_timeout = _number(environment, RUN_TIMEOUT_VARIABLE, RUN_TIMEOUT, float, failures)
         run_settle_seconds = _number(
@@ -161,7 +173,13 @@ class Settings:
         )
         run_model = _model(environment, failures)
         run_budget_usd = _budget(environment, failures)
-        if failures or credential is None or model_credential is None or project is None:
+        if (
+            failures
+            or credential is None
+            or model_credential is None
+            or project is None
+            or investigation is None
+        ):
             raise IncompleteConfiguration("\n".join(failures))
         return cls(
             credential=credential,
@@ -177,6 +195,7 @@ class Settings:
             run_model=run_model,
             run_budget_usd=run_budget_usd,
             run_settle_seconds=run_settle_seconds,
+            investigation=investigation,
         )
 
 
@@ -190,6 +209,7 @@ def render_skill(settings: Settings) -> Path:
         settings.skill_directory,
         rendered_skill_directory(settings.runs_directory),
         settings.project,
+        investigation_enabled=settings.investigation.enabled,
     )
     logger.info(
         "skill rendered for project %s, session label %s, at %s",
@@ -252,6 +272,7 @@ def serve(settings: Settings) -> int:
                 settings.project.key,
                 model=settings.run_model,
                 budget_usd=settings.run_budget_usd,
+                investigation_enabled=settings.investigation.enabled,
             ),
             forwarder=forwarder,
             model_credential=settings.model_credential,
@@ -261,6 +282,7 @@ def serve(settings: Settings) -> int:
             jira_email=settings.credential.email,
             project_key=settings.project.key,
             timeout=settings.run_timeout,
+            investigation_environment=settings.investigation.run_environment(),
         ),
         runs_directory=settings.runs_directory,
         host=settings.host,
