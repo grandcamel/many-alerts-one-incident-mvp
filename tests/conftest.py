@@ -68,6 +68,7 @@ BASIC_DEMO_TESTS = frozenset(
         "test_receiver.py",
         "test_replay.py",
         "test_reset.py",
+        "test_rolldice_fault.py",
         "test_run_command.py",
         "test_run_costs.py",
         "test_run_spawner.py",
