@@ -57,6 +57,7 @@ from grafana_jsm_sandbox.verify import World
 from grafana_jsm_sandbox.verify_mvp import MVP_SEQUENCE
 from tests.conftest import FIXTURES, REPOSITORY
 from tests.test_verify import FakeClock
+from tests.test_verify_mvp import closing_of, description_of, opening_of, summary_of, update_of
 
 KEY = "FAKE"
 EMAIL = "rehearsal@example.invalid"
@@ -1201,12 +1202,15 @@ class ScriptedRun:
 
     `verify` posts a Notification and this acts on the fake project at once, through
     `FakeJira.handle`, the way a real Run would through jira-as: search the Match, create
-    or update, comment, move on the first update, resolve on the Resolved.
+    with its Report, comment, move on the first update, resolve on the Resolved. What it writes
+    is the Skill's templates filled in from the Alerts, which `verify --mvp` holds it to.
     """
 
-    def __init__(self, fake: FakeJira, project: DemoProject):
+    def __init__(self, fake: FakeJira, project: DemoProject, description: dict | None = None):
         self.client = Client(fake)
         self.project = project
+        self.description = description
+        """What it writes as the Description in place of the Report, when it is given one."""
         self.posted: list[str] = []
 
     def post(self, url: str, notification: bytes) -> int:
@@ -1219,26 +1223,30 @@ class ScriptedRun:
         if parsed["status"] == "resolved":
             if matches:
                 key = matches[0]["key"]
-                self.client.comment(key, "Resolved after 9m: every Alert is resolved.")
+                runs = self.client.issue(key, "comment")["comment"]["total"]
+                self.client.comment(key, closing_of(len(labels), runs))
                 status, _ = self.client.move(key, self.project.status_done, resolution="Done")
                 if status == 400:
                     assert self.client.move(key, self.project.status_done)[0] == 204
             return 202
         if not matches:
             key = self.client.create(
-                [group, session, *labels], summary=f"{group}: {len(labels)} alerts firing"
+                [group, session, *labels],
+                summary=summary_of(labels),
+                description=self.description or description_of(labels),
             )
-            self.client.comment(key, "Opened from the firing Alerts.")
+            self.client.comment(key, opening_of(labels))
             return 202
         key = matches[0]["key"]
-        new = [label for label in labels if label not in matches[0]["fields"]["labels"]]
+        seen = matches[0]["fields"]["labels"]
+        new = [label for label in labels if label not in seen]
         if new:
             self.client.ok(
                 "PUT",
                 f"/rest/api/3/issue/{key}",
                 {"update": {"labels": [{"add": label} for label in new]}},
             )
-        self.client.comment(key, f"Update: {len(labels)} firing. New: {', '.join(new) or 'none'}.")
+        self.client.comment(key, update_of(labels, seen))
         if matches[0]["fields"]["status"]["name"] == self.project.status_open:
             assert self.client.move(key, self.project.status_in_progress)[0] == 204
         return 202
@@ -1290,3 +1298,42 @@ def test_verify_mvp_replay_watches_a_scripted_run_through_the_fake_end_to_end(
     assert issue["status"] == project.status_done and issue["resolution"] == "Done"
     assert len([label for label in issue["labels"] if label.startswith("fp-")]) == 4
     assert len(issue["comments"]) == 4
+
+
+@pytest.mark.usefixtures("jira_as_cli")
+def test_verify_mvp_replay_names_a_placeholder_description_through_the_real_jira_as(
+    served, env_file, capsys
+):
+    """The lifecycle is complete and the Description is `Test`: the Description is read back
+    through the real jira-as from the fake, and `verify` names it."""
+    assert configure.main(["--write"], env_file=env_file) == 0
+    capsys.readouterr()
+    values = read_env_file(env_file)
+    placeholder = {
+        "type": "doc",
+        "version": 1,
+        "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Test"}]}],
+    }
+    run = ScriptedRun(served.fake, DemoProject.from_environment(values), placeholder)
+    clock = FakeClock()
+    out: list[str] = []
+    world = World(
+        jira_as=jira_as_with(jira_as_environment(values, warn=lambda message: None)),
+        compose=lambda *arguments: pytest.fail(f"--replay asked compose for {arguments}"),
+        post=run.post,
+        grafana_state=lambda: "inactive",
+        now=clock.now,
+        sleep=clock.sleep,
+        out=out.append,
+    )
+
+    status = verify.main(
+        ["--mvp", "--replay", "--receiver", "http://127.0.0.1:9"], env_file=env_file, world=world
+    )
+
+    assert status == 1, "\n".join(out)
+    assert run.posted == ["firing"], "nothing more is posted after the failed stage"
+    assert out[-1].startswith(f"NOT VERIFIED: created — {KEY}-1's Description 'Test' is missing: ")
+    [issue] = served.fake.state()["issues"]
+    assert issue["description"] == "Test"
+    assert len([label for label in issue["labels"] if label.startswith("fp-")]) == 3
