@@ -8,13 +8,15 @@ every day probably has their production site there, reached through the
 environment, the keychain or a settings file, and the demo must never write to
 it by accident (the 2026-09-23 audit, F10).
 
-Three things live here:
+The demo's configuration lives here:
 
 - `read_env_file`, which reads the file the way compose does, closely enough for
   the values it holds;
 - `DemoProject`, the dedicated Jira project the demo writes to, which has no
   default: a default key would point Runs at whichever project on the site
   happens to have it;
+- `InvestigationSettings`, the opt-in Grafana URLs and Viewer token, read from
+  the Receiver's environment and passed to a Run only when enabled;
 - `jira_as_environment`, the whole environment a laptop helper starts `jira-as`
   with, built from `.env` rather than inherited.
 """
@@ -25,7 +27,7 @@ import os
 import re
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -143,6 +145,91 @@ class IncompleteDemoProject(ConfigurationError):
 
 class InvalidSessionId(IncompleteDemoProject):
     """A session id set in a shape the `ses-` label could not carry."""
+
+
+@dataclass(frozen=True)
+class InvestigationSettings:
+    """Opt-in Grafana investigation: internal queries and links for the presenter.
+
+    A Run holds the Viewer token only when investigation is enabled. Validation
+    names variables rather than values, and does not try the token against Grafana.
+    """
+
+    enabled: bool = False
+    url: str = "http://localhost:3000"
+    presenter_url: str = "http://localhost:3000"
+    viewer_token: str = field(default="", repr=False)
+
+    @classmethod
+    def from_environment(
+        cls, environment: Mapping[str, str] | None = None
+    ) -> InvestigationSettings:
+        """Read the settings, collecting enabled configuration errors without their values."""
+        environment = os.environ if environment is None else environment
+        flag = environment.get("DEMO_INVESTIGATION_ENABLED", "").strip().lower()
+        if flag not in {"", "false", "0", "true", "1"}:
+            raise ConfigurationError("DEMO_INVESTIGATION_ENABLED must be true, false, 1 or 0")
+        if flag in {"", "false", "0"}:
+            return cls()
+
+        failures: list[str] = []
+        url = _investigation_url(
+            environment, "DEMO_GRAFANA_URL", "http://localhost:3000", failures
+        )
+        presenter_default = "http://localhost:3000"
+        if "DEMO_GRAFANA_PRESENTER_URL" not in environment:
+            try:
+                port = int(environment.get("GRAFANA_HOST_PORT", "3000"))
+                if not 1 <= port <= 65535:
+                    raise ValueError
+                presenter_default = f"http://localhost:{port}"
+            except ValueError:
+                failures.append("GRAFANA_HOST_PORT must be an integer from 1 to 65535")
+        presenter_url = _investigation_url(
+            environment, "DEMO_GRAFANA_PRESENTER_URL", presenter_default, failures
+        )
+        raw_token = environment.get("DEMO_GRAFANA_VIEWER_TOKEN", "")
+        token = raw_token.strip()
+        if not token or "\r" in raw_token or "\n" in raw_token:
+            failures.append("DEMO_GRAFANA_VIEWER_TOKEN must be nonblank and contain no CR/LF")
+        if failures:
+            raise ConfigurationError("\n".join(failures))
+        return cls(enabled=True, url=url, presenter_url=presenter_url, viewer_token=token)
+
+    def run_environment(self) -> dict[str, str]:
+        """Exactly the four normalized investigation variables, or none when disabled."""
+        if not self.enabled:
+            return {}
+        return {
+            "DEMO_INVESTIGATION_ENABLED": "true",
+            "DEMO_GRAFANA_URL": self.url,
+            "DEMO_GRAFANA_PRESENTER_URL": self.presenter_url,
+            "DEMO_GRAFANA_VIEWER_TOKEN": self.viewer_token,
+        }
+
+
+def _investigation_url(
+    environment: Mapping[str, str], variable: str, default: str, failures: list[str]
+) -> str:
+    """A Grafana base URL, or a failure naming only the variable."""
+    value = environment.get(variable, default).strip()
+    try:
+        parts = urlsplit(value)
+        valid = (
+            parts.scheme in {"http", "https"}
+            and parts.hostname
+            and parts.port != 0
+            and parts.username is None
+            and parts.password is None
+            and "?" not in value
+            and "#" not in value
+            and not any(character.isspace() or ord(character) < 32 for character in value)
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        failures.append(f"{variable} must be an absolute http/https base URL")
+    return value.rstrip("/")
 
 
 def session_id_from_environment(environment: Mapping[str, str] | None = None) -> str:

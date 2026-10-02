@@ -17,6 +17,7 @@ from grafana_jsm_sandbox.notification import NOTIFICATION_FILENAME
 from grafana_jsm_sandbox.run_command import (
     DEFAULT_MODEL,
     SKILL_FILE,
+    allowed_tools,
     build_run_command,
     main,
     rendered_skill_directory,
@@ -31,6 +32,39 @@ PROJECT_KEY = "SANDBOX"
 @pytest.fixture
 def command() -> list[str]:
     return build_run_command(RUNS_DIRECTORY, PROJECT_KEY)
+
+
+def test_investigation_adds_exactly_grafana_query_after_incident_payload(command):
+    enabled = build_run_command(RUNS_DIRECTORY, PROJECT_KEY, investigation_enabled=True)
+    assert allowed_tools(RUNS_DIRECTORY, investigation_enabled=True) == (
+        "Bash(jira-as *)",
+        "Bash(incident-payload *)",
+        "Bash(grafana-query *)",
+        "Read(//srv/runs/**)",
+    )
+    assert values_of(enabled, "--allowedTools") == list(
+        allowed_tools(RUNS_DIRECTORY, investigation_enabled=True)
+    )
+    assert "Bash(grafana-query *)" in value_of(enabled, "--append-system-prompt")
+    without_query = [argument for argument in enabled if argument != "Bash(grafana-query *)"]
+    appendix = without_query.index("--append-system-prompt") + 1
+    without_query[appendix] = without_query[appendix].replace(", Bash(grafana-query *)", "")
+    assert without_query == command
+
+
+def test_disabled_investigation_preserves_the_base_argv_and_positional_callers(command):
+    assert allowed_tools(RUNS_DIRECTORY, investigation_enabled=False) == (
+        "Bash(jira-as *)",
+        "Bash(incident-payload *)",
+        "Read(//srv/runs/**)",
+    )
+    assert (
+        build_run_command(
+            RUNS_DIRECTORY, PROJECT_KEY, DEFAULT_MODEL, None, None, investigation_enabled=False
+        )
+        == command
+    )
+    assert "grafana-query" not in " ".join(command)
 
 
 def value_of(command: list[str], flag: str) -> str:

@@ -5,8 +5,9 @@ in a mode where any tool call outside the allow list is denied without a prompt
 (ADR 0003). The allow list is jira-as, `incident-payload`, which prints the
 jira-as commands a Run would otherwise build by hand, and reading the runs
 directory, which holds each Run's working directory and the Skill the Receiver
-rendered for this start, so a Run can talk to Jira and nothing else, and the
-denials show up in its Transcript where an audience can read them.
+rendered for this start. With investigation enabled, `grafana-query` also lets
+a Run query Grafana with a Viewer token. Denials show up in its Transcript
+where an audience can read them.
 
 The Receiver builds this command line for each Run in ticket 05. Print it to
 run one by hand, naming the runs directory and the demo's project key; the Run
@@ -41,12 +42,15 @@ PERMISSION_MODE = "dontAsk"
 """Anything not on the allow list is denied, without a prompt a Run could hang on."""
 
 JIRA_AS = "Bash(jira-as *)"
-"""Talking to Jira: the one command a Run may execute that reaches anything."""
+"""Talking to Jira through the Forwarder."""
 
 INCIDENT_PAYLOAD = "Bash(incident-payload *)"
 """Building the Jira payloads: a local command that reads the Notification and the project's
 facts, and prints jira-as lines. It opens no socket, starts no process and writes no file, so
 it adds no reach (ADR 0003's 2026-10-01 amendment)."""
+
+GRAFANA_QUERY = "Bash(grafana-query *)"
+"""Read-only Grafana queries authenticated with a Viewer token, only when enabled."""
 
 OUTPUT_FORMAT = "stream-json"
 """The Transcript: one Run event per line, rendered into the log as it arrives."""
@@ -77,7 +81,9 @@ def rendered_skill_directory(runs_directory: Path | str) -> Path:
     return Path(runs_directory) / RENDERED_SKILL
 
 
-def allowed_tools(runs_directory: Path) -> tuple[str, ...]:
+def allowed_tools(
+    runs_directory: Path, *, investigation_enabled: bool = False
+) -> tuple[str, ...]:
     """Everything a Run may do: talk to Jira, build its payloads, and read under one directory.
 
     A bare `Read` would let a Run read any file its uid can, and the container's
@@ -89,8 +95,10 @@ def allowed_tools(runs_directory: Path) -> tuple[str, ...]:
 
     The runs directory holds each Run's working directory and so its Notification,
     and the rendered Skill, so one rule covers both.
+    Investigation adds only `grafana-query`, whose queries use a Viewer token.
     """
-    return (JIRA_AS, INCIDENT_PAYLOAD, read_rule(runs_directory))
+    investigation = (GRAFANA_QUERY,) if investigation_enabled else ()
+    return (JIRA_AS, INCIDENT_PAYLOAD, *investigation, read_rule(runs_directory))
 
 
 def read_rule(directory: Path) -> str:
@@ -104,6 +112,8 @@ def build_run_command(
     model: str = DEFAULT_MODEL,
     budget_usd: float | None = None,
     prompt: str | None = None,
+    *,
+    investigation_enabled: bool = False,
 ) -> list[str]:
     """The argv that starts one Run, to be executed in the Run's working directory.
 
@@ -124,7 +134,7 @@ def build_run_command(
     """
     runs_directory = Path(runs_directory).resolve()
     skill_directory = rendered_skill_directory(runs_directory)
-    tools = allowed_tools(runs_directory)
+    tools = allowed_tools(runs_directory, investigation_enabled=investigation_enabled)
     budget = [] if budget_usd is None else ["--max-budget-usd", str(budget_usd)]
     return [
         CLAUDE,

@@ -50,11 +50,12 @@ from grafana_jsm_sandbox.fake_jira import (
     Server,
     Workflow,
 )
+from grafana_jsm_sandbox.investigation_contract import is_investigation
 from grafana_jsm_sandbox.notification import NOTIFICATION_FILENAME
 from grafana_jsm_sandbox.reset import jira_as_with
 from grafana_jsm_sandbox.run_command import RENDERED_SKILL, SKILL_FILE
 from grafana_jsm_sandbox.verify import World
-from grafana_jsm_sandbox.verify_mvp import MVP_SEQUENCE
+from grafana_jsm_sandbox.verify_mvp import MVP_SEQUENCE, comment_text
 from tests.conftest import FIXTURES, REPOSITORY
 from tests.test_verify import FakeClock
 from tests.test_verify_mvp import closing_of, description_of, opening_of, summary_of, update_of
@@ -937,6 +938,7 @@ def shape(line: str) -> str:
                     "duration",
                     "description",
                     "service",
+                    "total",
                 )
             },
         )
@@ -960,12 +962,16 @@ def test_the_real_jira_as_carries_out_every_command_line_of_the_rendered_skill(
     jira_as = cli_for(served, monkeypatch)
     project = project_for(workflow, served.fake)
     rendered = skill_template.render(TEMPLATE, project)
-    commands = {shape(line): line for line in skill_commands(rendered)}
+    commands = {
+        "collaborate comment larger" if "<total>" in line else shape(line): line
+        for line in skill_commands(rendered)
+    }
     assert set(commands) == {
         "search jql",
         "getProjectComponents",
         "getServerInfo",
         "collaborate comment",
+        "collaborate comment larger",
         "lifecycle transitions",
         "move",
         "resolve",
@@ -1061,9 +1067,16 @@ def test_the_real_jira_as_carries_out_every_command_line_of_the_rendered_skill(
     # Run 4: every Alert resolved, so the close.
     match = the_match()
     listed = json.loads(run("collaborate comment", key=key))
-    assert len(listed["comments"]) == 1, "the Skill asks for one comment, not every one"
-    count = listed["total"]
-    assert count == 3, "step 2c counts the Runs by the comments so far"
+    assert "--order asc --limit 200" in commands["collaborate comment"]
+    assert len(listed["comments"]) == listed["total"], "count only a complete list"
+    # Exercise the larger-page command too, with Jira's total as its limit.
+    larger = json.loads(run("collaborate comment larger", key=key, total=listed["total"]))
+    assert len(larger["comments"]) == larger["total"]
+    assert larger["comments"] == listed["comments"]
+    count = sum(
+        not is_investigation(comment_text(comment["body"])) for comment in listed["comments"]
+    )
+    assert count == 3, "step 2c counts prior lifecycle comments"
     [comment] = against(match, resolved, "close", "--runs", str(count))
     as_printed(comment)
     transitions = {
@@ -1223,8 +1236,13 @@ class ScriptedRun:
         if parsed["status"] == "resolved":
             if matches:
                 key = matches[0]["key"]
-                runs = self.client.issue(key, "comment")["comment"]["total"]
-                self.client.comment(key, closing_of(len(labels), runs))
+                comments = self.client.issue(key, "comment")["comment"]
+                assert len(comments["comments"]) == comments["total"]
+                prior = sum(
+                    not is_investigation(comment_text(comment["body"]))
+                    for comment in comments["comments"]
+                )
+                self.client.comment(key, closing_of(len(labels), prior + 1))
                 status, _ = self.client.move(key, self.project.status_done, resolution="Done")
                 if status == 400:
                     assert self.client.move(key, self.project.status_done)[0] == 204

@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from grafana_jsm_sandbox import __main__ as process
-from grafana_jsm_sandbox import doctor
+from grafana_jsm_sandbox import doctor, grafana_query
 from grafana_jsm_sandbox.__main__ import (
     LOG_FORMAT,
     LOG_TIME_FORMAT,
@@ -232,6 +232,131 @@ def settings_in(tmp_path: Path, **overrides) -> Settings:
     return Settings.from_environment(
         complete_but(RUNS_DIRECTORY=str(tmp_path / "runs"), **overrides)
     )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_investigation_settings_reach_the_skill_command_and_spawner(
+    tmp_path, monkeypatch, caplog, enabled
+):
+    caplog.set_level(logging.INFO)
+    settings = settings_in(
+        tmp_path,
+        DEMO_INVESTIGATION_ENABLED=str(enabled),
+        DEMO_GRAFANA_URL="http://lgtm:3000",
+        DEMO_GRAFANA_PRESENTER_URL="https://presenter.invalid/grafana/",
+        DEMO_GRAFANA_VIEWER_TOKEN="viewer-token-private",
+    )
+    given = {}
+
+    def spawner(**arguments):
+        given.update(arguments)
+        raise Started
+
+    monkeypatch.setattr(process, "Forwarder", StandInForwarder)
+    monkeypatch.setattr(process, "RunSpawner", spawner)
+    with pytest.raises(Started):
+        serve(settings)
+
+    skill = (settings.runs_directory / ".skill" / SKILL_FILE).read_text()
+    assert ("grafana-query" in skill) is enabled
+    assert given["command"] == build_run_command(
+        settings.runs_directory, settings.project.key, investigation_enabled=enabled
+    )
+    expected = (
+        {
+            "DEMO_INVESTIGATION_ENABLED": "true",
+            "DEMO_GRAFANA_URL": "http://lgtm:3000",
+            "DEMO_GRAFANA_PRESENTER_URL": "https://presenter.invalid/grafana",
+            "DEMO_GRAFANA_VIEWER_TOKEN": "viewer-token-private",
+        }
+        if enabled
+        else {}
+    )
+    assert given["investigation_environment"] == expected
+    assert "viewer-token-private" not in skill + repr(settings) + caplog.text
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("DEMO_INVESTIGATION_ENABLED", "viewer-token-private"),
+        ("DEMO_GRAFANA_URL", "http://viewer-token-private@lgtm"),
+        ("DEMO_GRAFANA_PRESENTER_URL", "http://lgtm?viewer-token-private"),
+        ("DEMO_GRAFANA_VIEWER_TOKEN", None),
+        ("DEMO_GRAFANA_VIEWER_TOKEN", "viewer-token-private\n"),
+        ("GRAFANA_HOST_PORT", "viewer-token-private"),
+    ],
+)
+def test_bad_investigation_settings_refuse_startup_before_listening_with_names_only(
+    monkeypatch, capsys, variable, value
+):
+    def unexpected(*args):
+        raise AssertionError("startup reached serving or process protection")
+
+    monkeypatch.setattr(process, "serve", unexpected)
+    monkeypatch.setattr(process, "refuse_to_be_read", unexpected)
+    environment = complete_but(
+        DEMO_INVESTIGATION_ENABLED="true", DEMO_GRAFANA_VIEWER_TOKEN="viewer-token-private"
+    )
+    if value is None:
+        environment.pop(variable, None)
+    else:
+        environment[variable] = value
+
+    assert main([], environment=environment) == 1
+    said = capsys.readouterr()
+    assert variable in said.err
+    assert "viewer-token-private" not in said.out + said.err
+
+
+def test_investigation_errors_are_collected_with_existing_startup_errors(capsys):
+    assert (
+        main(
+            [],
+            environment={
+                "DEMO_INVESTIGATION_ENABLED": "true",
+                "DEMO_GRAFANA_URL": "bad-internal-origin",
+                "DEMO_GRAFANA_PRESENTER_URL": "bad-presenter-origin",
+                "RUN_MODEL": "-x",
+                "RECEIVER_PORT": "bad-port",
+            },
+        )
+        == 1
+    )
+
+    said = capsys.readouterr().err
+    for variable in (
+        *COMPLETE,
+        "DEMO_GRAFANA_URL",
+        "DEMO_GRAFANA_PRESENTER_URL",
+        "DEMO_GRAFANA_VIEWER_TOKEN",
+        "RUN_MODEL",
+        "RECEIVER_PORT",
+    ):
+        assert variable in said
+    assert "bad-internal-origin" not in said
+    assert "bad-presenter-origin" not in said
+
+
+def test_published_port_reaches_presenter_link_construction(tmp_path, monkeypatch):
+    """D passes the resolved compose port to B; only the resulting URL reaches the CLI."""
+    settings = settings_in(
+        tmp_path,
+        DEMO_INVESTIGATION_ENABLED="true",
+        DEMO_GRAFANA_VIEWER_TOKEN="viewer-token-private",
+        DEMO_GRAFANA_URL="http://lgtm:3000",
+        GRAFANA_HOST_PORT="3300",
+    )
+    run_environment = settings.investigation.run_environment()
+    monkeypatch.setattr(grafana_query.os, "environ", run_environment)
+    internal, presenter, token = grafana_query._configuration()
+    args = grafana_query._parser().parse_args(["instant", "--query", "up", "--time", "1"])
+    link = grafana_query._presenter(presenter, args, "/api/v1/query", [], 1, 1)
+
+    assert internal == "http://lgtm:3000"
+    assert link.startswith("http://localhost:3300/explore?")
+    assert "lgtm" not in link and token not in link
+    assert "GRAFANA_HOST_PORT" not in run_environment
 
 
 def test_every_start_renders_the_skill_for_the_project_into_the_runs_directory(tmp_path):

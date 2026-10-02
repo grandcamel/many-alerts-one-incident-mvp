@@ -1,4 +1,4 @@
-"""Starting one Run for real: a child process that can only talk to Jira.
+"""Starting one Run for real: Jira through the Forwarder, and opt-in Grafana queries.
 
 The Receiver injects one of these as its spawner. Around each Run it does the
 three things that make the credential boundary true (ADR 0002): it builds the
@@ -63,8 +63,9 @@ OAUTH_TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
 MODEL_CREDENTIAL_VARIABLES = (API_KEY_VARIABLE, OAUTH_TOKEN_VARIABLE)
 """The two names a Run's model credential may come under. Exactly one of them is set: the
 Claude CLI reads both, and which it would prefer when handed both is its business, not the
-demo's, so two is refused rather than guessed between. Whichever is set is the one real
-credential a Run holds, passed on under its own name. Nothing documented can mask it; the
+demo's, so two is refused rather than guessed between. Whichever is set is the model
+credential a Run holds, passed on under its own name. A Run also holds a Grafana Viewer
+token when investigation is enabled. Nothing documented can mask it; the
 demo says so."""
 
 CREDENTIAL_KINDS = {
@@ -118,7 +119,7 @@ intercepting proxy its Anthropic traffic goes through the same proxy the build d
 Claude Code reads `NODE_EXTRA_CA_CERTS` for the CA. Its Jira traffic needs none of them,
 because that goes to the Forwarder over loopback in plain HTTP.
 
-They are the only thing a Run inherits: the environment is still built from scratch, and
+They are the only thing a Run inherits implicitly: the environment is built from scratch, and
 the real Jira token still never reaches it (ADR 0002)."""
 
 SENTINEL_BYTES = 24
@@ -212,6 +213,7 @@ class RunSpawner:
     timeout: float = RUN_TIMEOUT
     path: str = field(default_factory=lambda: os.environ.get("PATH", os.defpath))
     trust_store: Mapping[str, str] = field(default_factory=trust_store_from_environment)
+    investigation_environment: Mapping[str, str] = field(default_factory=dict, repr=False)
 
     def __call__(self, run: Run) -> RunOutcome:
         """Run one Run to completion and say how it ended."""
@@ -298,15 +300,17 @@ class RunSpawner:
         The model credential goes under the name it came in under, an API key's
         or an OAuth token's, and the other name is not set at all. The Jira
         variables are the ones jira-as reads, so a Run needs no patching
-        to talk to the Forwarder — it only ever holds the sentinel — and it may name
+        to talk to the Forwarder — it holds a sentinel for Jira — and it may name
         the demo's project and no other. HOME is not among them: the Claude CLI
         falls back to the account's home directory, and leaving it out keeps the
         list short enough to read aloud. The trust
-        store is the one thing carried over from the Receiver's own environment,
-        and only when the Receiver has one.
+        store is carried over from the Receiver's own environment when present.
+        The supplied investigation variables add the Grafana URLs and Viewer
+        token only when investigation is enabled.
         """
         return {
             **self.trust_store,
+            **self.investigation_environment,
             self.model_credential.variable: self.model_credential.value,
             ENVIRONMENT_VARIABLES["site_url"]: self.forwarder.url,
             ENVIRONMENT_VARIABLES["email"]: self.jira_email,
