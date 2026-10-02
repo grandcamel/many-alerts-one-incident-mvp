@@ -93,3 +93,67 @@ real-model query choice, OTLP delivery, Grafana browser behavior or real Jira ac
 
 Fallback: disable `DEMO_INVESTIGATION_ENABLED` and recreate the demo service using the
 owner's established runbook. This returns to the existing lifecycle-only presentation.
+
+## Optional malformed-input Fault
+
+This separate take gives the investigator a real application exception to correlate
+with a drop in successful responses. The app accepts an optional `sides` query
+parameter, defaulting to `6`. Traffic passes `ROLLDICE_SIDES` as that parameter.
+Sending `six` instead of a number causes the request's integer conversion to raise
+`ValueError`; Flask returns HTTP 500 and logs the exception. This explanation is
+operator context only: the Run must discover and support its own interpretation
+from the returned metrics and logs.
+
+Use the owner's integrated checkout and established Compose project for these
+commands. First rebuild the app with this change, then warm up healthy traffic:
+
+```bash
+docker compose up -d --build rolldice
+ROLLDICE_SIDES=6 docker compose up -d --no-deps --force-recreate traffic
+```
+
+Before injecting, follow the [fresh-session and settle steps](mvp-runbook.md#5-before-every-take).
+Confirm the prior Incident is closed, all rules are Normal, investigation is enabled,
+and successful HTTP 200 samples have appeared in Grafana for at least two minutes.
+Use a fresh session: adding a Fault to an already-open Incident does not trigger a
+second investigation, because only the create Run investigates.
+
+Inject by recreating **traffic only**:
+
+```bash
+ROLLDICE_SIDES=six docker compose up -d --no-deps --force-recreate traffic
+```
+
+Keep rolldice running throughout injection and reset. Restarting it could remove the
+previously observed 200 series; the success-drop rule treats missing data as OK.
+Requests continue despite HTTP failures. This take is expected to fire
+`rolldice-2xx-drop` (successful responses have dropped), while the three
+traffic-absence rules remain Normal. It is a diagnostic extension to the main
+four-Alert traffic-stop demonstration. Its timing and metric-series persistence
+still require a live rehearsal; do not promise the traffic-stop timeline for it.
+
+During that rehearsal, verify that the traceback reaches Loki, the Run queries it
+through Grafana, and the same Incident gains an evidence comment citing the failed
+integer conversion and relevant metric window. The explanation should distinguish
+observed malformed input from any unverified claim about who changed it. Because
+excerpts are bounded, the Run may need a narrower LogQL expression to retrieve the
+exception rather than routine request logs. A narrower selector does not shorten an
+individual multiline entry: a traceback's final exception can fall beyond the first
+600 characters shown in the ticket. Inspect the full raw evidence and Explore result
+(and any exception metadata supplied by the installed OTLP mapping), then verify
+that the Run's observation and interpretation cite what they actually contain. Check
+the literal excerpts and Explore link before presenting.
+
+Reset explicitly, even if injection or investigation fails:
+
+```bash
+ROLLDICE_SIDES=6 docker compose up -d --no-deps --force-recreate traffic
+```
+
+Verify successful responses resume, the Alert returns to Normal, and the closing Run
+finishes. Follow the runbook's settle procedure before another take. To return to the
+usual traffic-stop demonstration, leave `ROLLDICE_SIDES=6` and use its existing steps.
+
+Local Flask tests cover actual HTTP 500 responses, emitted exception logs and recovery
+in the same app, and local shell tests cover the traffic command. They do not establish
+OTLP delivery, live Alert firing, model diagnosis, Jira acceptance or presentation latency.

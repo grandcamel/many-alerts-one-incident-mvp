@@ -153,10 +153,14 @@ services:
   # resolves it. It has no restart policy so that a stop stays stopped.
   traffic:
     image: alpine:3.20
+    environment:
+      # Recreate traffic with six to exercise the app's real ValueError/500 path;
+      # reset with 6. Keep rolldice running so its earlier 200 series can persist.
+      ROLLDICE_SIDES: ${ROLLDICE_SIDES:-6}
     command:
       - sh
       - -c
-      - while true; do wget -qO- 'http://rolldice:8082/rolldice?player=demo'; echo; sleep 1; done
+      - while true; do wget -qO- "http://rolldice:8082/rolldice?player=demo&sides=$${ROLLDICE_SIDES}"; echo; sleep 1; done
     # The shell loop ignores SIGTERM, so without this a `stop` sends traffic for
     # the full ten-second grace period before the kill, and the presenter's one
     # action returns ten seconds late (ticket 08 rehearsal).

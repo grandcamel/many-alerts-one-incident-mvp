@@ -7,7 +7,7 @@ grafana/docker-otel-lgtm (https://github.com/grafana/docker-otel-lgtm),
 directory examples/python/, Copyright Grafana Labs, and is licensed under the
 Apache License, Version 2.0 (a copy is in LICENSES/Apache-2.0.txt):
 
-    docker/rolldice/app.py            as upstream, with the attribution header added
+    docker/rolldice/app.py            modified; its header says how
     docker/rolldice/requirements.txt  as upstream, with the attribution header added
     docker/rolldice/Dockerfile        modified; its header says how
 
