@@ -5,6 +5,12 @@ per-Run sentinel as its API token. The Forwarder swaps that sentinel for the
 real email and token and forwards the request to the configured Atlassian site,
 so the token exists only in the Receiver's process (ADR 0002).
 
+A sentinel also carries one issue-create attempt, spent by the first create it presents
+whatever Jira answers. A second is refused here, so a Run that gets its create wrong
+cannot probe the project with altered payloads. The first is forwarded only if it carries an
+Incident's content, so a create jira-as built from a mangled argument cannot leave a
+placeholder Incident behind (ADR 0002's 2026-10-01 amendment).
+
 Run it on its own to point a jira-as on this machine at the real site through a
 sentinel, which is the manual check for the credential boundary:
 
@@ -15,7 +21,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import enum
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -30,7 +38,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +76,51 @@ _TEXT = {"Content-Type": "text/plain; charset=utf-8"}
 UNREACHABLE_BODY = b"upstream is unreachable"
 """The body of the 502 the Forwarder writes itself when the site cannot be reached at all, so a
 caller can tell it from a 502 the site sent: `doctor` reads the one as a network problem."""
+
+CREATE_REFUSAL = "this Run already made its one create attempt"
+"""Why a second issue create is refused. The log formatter looks for these words in a Run's
+tool result, to show the refusal as the deliberate one it is."""
+
+CREATE_INCOMPLETE = "this create does not carry an Incident's content"
+"""Why a first issue create is refused: its body is not the Incident the Skill builds. The log
+formatter looks for these words too."""
+
+CREATE_REFUSALS = (CREATE_REFUSAL, CREATE_INCOMPLETE)
+"""The words that mark a create the Forwarder refused on purpose, whichever the reason."""
+
+CREATE_REFUSED_BODY = json.dumps(
+    {
+        "errorMessages": [
+            (
+                f"Refused: {CREATE_REFUSAL}. No second create reaches Jira, so do not retry or "
+                "change the fields."
+            )
+        ],
+        "errors": {},
+    }
+).encode()
+"""What a Run's jira-as reads for the 409: Jira's own error shape, so it prints the message
+rather than a parsing failure. It is short because jira-as prefixes it and the log shows a
+line only so wide."""
+
+GROUP_LABEL_PREFIX = "grp-"
+SESSION_LABEL_PREFIX = "ses-"
+"""The two labels every Incident a Run creates carries. `demo_config` and `verify_mvp` own
+these spellings, and a test pins them equal: this module cannot import `demo_config`, which
+imports it."""
+
+_JSON = {"Content-Type": "application/json"}
+"""The headers on the Jira-shaped error the Forwarder writes itself."""
+
+_ISSUE_CREATE_PATH = re.compile(
+    r"/rest/api/(?:2|3|latest)/issue(?:/bulk)?|/rest/servicedeskapi/request"
+)
+"""The paths a POST creates an issue at: either API version (or `latest`), its bulk form, and
+the Service Management request. jira-as reaches them through `issue create`, `agile epic
+create`, `agile subtask`, the two `clone` commands, `jsm request create` and the `api call`
+operations createIssue, createIssues and createCustomerRequest. Its other POSTs are
+comments, transitions, links, searches and administration, and everything else a Run sends
+is not counted."""
 
 DIAGNOSED_BODY_BYTES = 4096
 """How much of an upstream error body is searched for the words of an IP-allowlist refusal.
@@ -116,6 +169,15 @@ ENVIRONMENT_VARIABLES = {
 """Where the owning process reads the real credential from. A Run sees none of these values."""
 
 
+class _Admission(enum.Enum):
+    """What the Forwarder makes of a request before it decides to forward it."""
+
+    ADMITTED = enum.auto()
+    NOT_THE_SENTINEL = enum.auto()
+    FIRST_CREATE = enum.auto()
+    SECOND_CREATE = enum.auto()
+
+
 class IncompleteJiraCredential(ValueError):
     """The owning process has no usable Jira credential, so nothing should start."""
 
@@ -159,6 +221,7 @@ class Forwarder:
         self._credential = credential
         self._host = host
         self._sentinel: str | None = None
+        self._create_attempted = False
         self._sentinel_lock = threading.Lock()
         self._server = ThreadingHTTPServer((host, port), _build_handler(self))
         self._thread: threading.Thread | None = None
@@ -186,22 +249,44 @@ class Forwarder:
         self._server.server_close()
 
     def set_sentinel(self, sentinel: str) -> None:
-        """Accept this sentinel, and only this one, until it is replaced or cleared."""
+        """Accept this sentinel, and only this one, until it is replaced or cleared.
+
+        It starts with its Run's one create attempt unspent.
+        """
         with self._sentinel_lock:
             self._sentinel = sentinel
+            self._create_attempted = False
 
     def clear_sentinel(self) -> None:
         """Accept nothing. A sentinel from a Run that has ended is worth nothing."""
         with self._sentinel_lock:
             self._sentinel = None
+            self._create_attempted = False
 
     def handle(
         self, method: str, path: str, headers: Message, body: bytes
     ) -> tuple[int, dict[str, str], bytes]:
-        """Answer one request from a Run: check its sentinel, then forward it upstream."""
-        if not self._accepts(_presented_sentinel(headers.get("Authorization"))):
+        """Answer one request from a Run: check its sentinel, then forward it upstream.
+
+        The first issue create a sentinel presents is that Run's attempt. It is forwarded if
+        its body carries an Incident's content, and answered 400 here if not; either way the
+        attempt is spent, and whatever upstream answers, or whether it answers at all, does
+        not give it back. Any later one is answered 409 here and goes nowhere.
+        """
+        admission = self._admit(
+            _presented_sentinel(headers.get("Authorization")), _creates_an_issue(method, path)
+        )
+        if admission is _Admission.NOT_THE_SENTINEL:
             logger.warning("refused a %s %s with no valid sentinel", method, path)
             return 401, dict(_TEXT), b"the presented token is not the active sentinel"
+        if admission is _Admission.SECOND_CREATE:
+            logger.warning("refused a %s %s: %s", method, path, CREATE_REFUSAL)
+            return 409, dict(_JSON), CREATE_REFUSED_BODY
+        if admission is _Admission.FIRST_CREATE:
+            problem = missing_from_incident(body)
+            if problem is not None:
+                logger.warning("refused a %s %s: %s (%s)", method, path, CREATE_INCOMPLETE, problem)
+                return 400, dict(_JSON), incomplete_create_body(problem)
         status, upstream_headers, upstream_body = self._send_upstream(
             method, path, _headers_to_send_upstream(headers), body
         )
@@ -218,13 +303,25 @@ class Forwarder:
             )
         return status, _headers_to_send_back(upstream_headers), upstream_body
 
-    def _accepts(self, presented: str | None) -> bool:
-        """Whether this is the sentinel of the Run that is currently allowed to call Jira."""
+    def _admit(self, presented: str | None, creates_an_issue: bool) -> _Admission:
+        """Whether this is the sentinel of the Run that is currently allowed to call Jira, and
+        if it is creating an issue, whether the Run still has its attempt.
+
+        The check and the spending of the attempt are one step under one lock, so creates
+        racing on a sentinel cannot both be admitted.
+        """
         with self._sentinel_lock:
             sentinel = self._sentinel
-        if sentinel is None or presented is None:
-            return False
-        return secrets.compare_digest(sentinel, presented)
+            if sentinel is None or presented is None:
+                return _Admission.NOT_THE_SENTINEL
+            if not secrets.compare_digest(sentinel, presented):
+                return _Admission.NOT_THE_SENTINEL
+            if creates_an_issue:
+                if self._create_attempted:
+                    return _Admission.SECOND_CREATE
+                self._create_attempted = True
+                return _Admission.FIRST_CREATE
+            return _Admission.ADMITTED
 
     def _send_upstream(
         self, method: str, path: str, headers: dict[str, str], body: bytes
@@ -365,6 +462,89 @@ def _is_loopback(host: str) -> bool:
     return all(ipaddress.ip_address(info[4][0]).is_loopback for info in resolved)
 
 
+def _creates_an_issue(method: str, target: str) -> bool:
+    """Whether a request asks Jira to create an issue: a POST to one of the create paths.
+
+    The path is read as `_upstream_url` reads it, so a proxy-style absolute target counts
+    by the path it is sent to. It is then spelled out plainly: percent-escapes undone, path
+    parameters dropped, `.` and `..` resolved, slashes collapsed and case ignored. Atlassian's
+    edge may read any of those spellings as the create path and the Forwarder cannot know
+    which, so each counts as one.
+    """
+    if method.upper() != "POST":
+        return False
+    try:
+        path = unquote(urlsplit(target).path)
+    except ValueError:
+        return False  # a target that cannot be read is never sent upstream either
+    segments: list[str] = []
+    for segment in path.split("/"):
+        segment = segment.partition(";")[0]
+        if segment == "..":
+            if segments:
+                segments.pop()
+        elif segment not in ("", "."):
+            segments.append(segment)
+    return _ISSUE_CREATE_PATH.fullmatch("/" + "/".join(segments).lower()) is not None
+
+
+def missing_from_incident(body: bytes) -> str | None:
+    """What a create's body lacks of the Incident the Skill builds, or None when it has all.
+
+    Counting creates does not stop a placeholder: a create jira-as made from a mangled
+    `--description` goes out as the first attempt and makes the Incident, whatever it holds.
+    The body is read as the Skill's create sends it. `fields.description` is an ADF document
+    with a bullet list in it, one item per firing Alert, and `fields.labels` holds the group
+    label and the session label. jira-as passes any JSON object it is given as ADF, so only
+    this check, not jira-as, tells a bullet list from `Test`. A body that is not that shape
+    at all, a bulk create or a Service Management request included, lacks it too.
+    """
+    try:
+        document = json.loads(body)
+    except (ValueError, RecursionError):
+        return "its body is not JSON"
+    fields = document.get("fields") if isinstance(document, dict) else None
+    if not isinstance(fields, dict):
+        return "its body has no fields object"
+    if not _holds_a_bullet_list(fields.get("description")):
+        return "its description is not a document with a bullet list"
+    given = fields.get("labels")
+    labels = [label for label in given if isinstance(label, str)] if isinstance(given, list) else []
+    for prefix, name in ((GROUP_LABEL_PREFIX, "group"), (SESSION_LABEL_PREFIX, "session")):
+        if not any(label.startswith(prefix) for label in labels):
+            return f"its labels have no {name} label starting {prefix}"
+    return None
+
+
+def _holds_a_bullet_list(description: object) -> bool:
+    """Whether this is an ADF document with at least one non-empty bullet list at its top."""
+    if not isinstance(description, dict) or description.get("type") != "doc":
+        return False
+    content = description.get("content")
+    return isinstance(content, list) and any(
+        isinstance(node, dict)
+        and node.get("type") == "bulletList"
+        and isinstance(node.get("content"), list)
+        and bool(node["content"])
+        for node in content
+    )
+
+
+def incomplete_create_body(problem: str) -> bytes:
+    """The Jira-shaped 400 for a create that does not carry an Incident's content."""
+    return json.dumps(
+        {
+            "errorMessages": [
+                (
+                    f"Refused: {CREATE_INCOMPLETE} ({problem}). This Run's one create attempt is "
+                    "spent, so do not retry or change the fields."
+                )
+            ],
+            "errors": {},
+        }
+    ).encode()
+
+
 def _headers_to_send_upstream(headers: Message) -> dict[str, str]:
     """The Run's own headers, minus the ones this hop owns. jira-as works unmodified."""
     return _without(headers.items(), _HEADERS_NOT_SENT_UPSTREAM)
@@ -420,6 +600,11 @@ def main(argv: list[str] | None = None) -> int:
     print("point jira-as at the Forwarder with a sentinel in place of the token:\n", flush=True)
     print(f"    export JIRA_SITE_URL={forwarder.url}", flush=True)
     print(f"    export JIRA_API_TOKEN={sentinel}\n", flush=True)
+    print(
+        "the sentinel may make one issue-create attempt, as a Run's does, and only one that "
+        "carries an Incident's content\n",
+        flush=True,
+    )
     try:
         threading.Event().wait()
     except KeyboardInterrupt:
