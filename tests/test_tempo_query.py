@@ -189,7 +189,7 @@ def test_protocol_empty_fields_remain_no_returned_data(
         parameters = dict(evidence["parameters"])
         assert parameters["limit"] == "20" and evidence["datasource"] == "tempo"
         for key in ("start", "end"):
-            timestamp = datetime.fromisoformat(evidence["window"][key].replace("Z", "+00:00"))
+            timestamp = datetime.fromisoformat(evidence["window"][key])
             assert timestamp.timestamp() == int(parameters[key])
         assert int(parameters["end"]) - int(parameters["start"]) == 600
 

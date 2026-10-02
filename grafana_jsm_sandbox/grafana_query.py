@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation, ROUND_FLOOR
+from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit
 

@@ -7,25 +7,32 @@ import binascii
 import re
 
 
+class TempoShapeError(ValueError):
+    """A Tempo search or trace without the shape these summaries read.
+
+    A `ValueError`, so every caller that reports a malformed response keeps catching it.
+    """
+
+
 def normalize_trace_id(value: str) -> str:
     """Normalize Tempo's possibly trimmed hex ID, rejecting zero and excess bits."""
     if (
         not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{1,32}", value)
         or int(value, 16) == 0
     ):
-        raise ValueError("invalid trace ID")
+        raise TempoShapeError("invalid trace ID")
     return value.lower().zfill(32)
 
 
 def _uint(value, bits: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 2 ** bits:
-        raise ValueError("invalid unsigned integer")
+        raise TempoShapeError("invalid unsigned integer")
     return value
 
 
 def _nanoseconds(value) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[0-9]+", value):
-        raise ValueError("invalid nanosecond timestamp")
+        raise TempoShapeError("invalid nanosecond timestamp")
     return str(_uint(int(value), 64))
 
 
@@ -33,26 +40,26 @@ def _optional_string(data, key):
     if key not in data:
         return None
     if not isinstance(data[key], str):
-        raise ValueError("invalid string")
+        raise TempoShapeError("invalid string")
     return data[key]
 
 
 def summarize_search(response, limit: int) -> dict:
     """Validate a search and summarize the three longest returned traces."""
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-        raise ValueError("invalid trace limit")
+        raise TempoShapeError("invalid trace limit")
     if not isinstance(response, dict) or any(
         key in response for key in ("error", "errors", "errorType", "status", "message")
     ):
-        raise ValueError("invalid Tempo search")
+        raise TempoShapeError("invalid Tempo search")
     traces = response.get("traces", [])
     metrics = response.get("metrics", {})
     if not isinstance(traces, list) or not isinstance(metrics, dict):
-        raise ValueError("invalid Tempo search fields")
+        raise TempoShapeError("invalid Tempo search fields")
     excerpts = []
     for trace in traces:
         if not isinstance(trace, dict):
-            raise ValueError("invalid trace metadata")
+            raise TempoShapeError("invalid trace metadata")
         excerpts.append({
             "trace_id": normalize_trace_id(trace.get("traceID")),
             "root_service": _optional_string(trace, "rootServiceName"),
@@ -73,18 +80,18 @@ def summarize_search(response, limit: int) -> dict:
 
 def _id(value, width: int) -> str:
     if not isinstance(value, str):
-        raise ValueError("invalid encoded ID")
-    if re.fullmatch(r"[0-9a-fA-F]{%d}" % (width * 2), value):
+        raise TempoShapeError("invalid encoded ID")
+    if re.fullmatch(rf"[0-9a-fA-F]{{{width * 2}}}", value):
         decoded = bytes.fromhex(value)
     else:
         try:
             decoded = base64.b64decode(value, validate=True)
         except (ValueError, binascii.Error):
-            raise ValueError("invalid encoded ID") from None
+            raise TempoShapeError("invalid encoded ID") from None
         if base64.b64encode(decoded).decode() != value:
-            raise ValueError("noncanonical encoded ID")
+            raise TempoShapeError("noncanonical encoded ID")
     if len(decoded) != width or not any(decoded):
-        raise ValueError("invalid ID width or zero ID")
+        raise TempoShapeError("invalid ID width or zero ID")
     return decoded.hex()
 
 
@@ -93,30 +100,30 @@ def _enum(value, names: tuple[str, ...]) -> str:
         return names[value]
     if isinstance(value, str) and value in names:
         return value
-    raise ValueError("unknown enum")
+    raise TempoShapeError("unknown enum")
 
 
 def _array(data, key):
     value = data.get(key, [])
     if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
-        raise ValueError("invalid repeated field")
+        raise TempoShapeError("invalid repeated field")
     return value
 
 
 def _service(resource_spans):
     resource = resource_spans.get("resource", {})
     if not isinstance(resource, dict):
-        raise ValueError("invalid resource")
+        raise TempoShapeError("invalid resource")
     service = None
     for attribute in _array(resource, "attributes"):
         if not isinstance(attribute.get("key"), str) or not isinstance(attribute.get("value", {}), dict):
-            raise ValueError("invalid resource attribute")
+            raise TempoShapeError("invalid resource attribute")
         if attribute["key"] == "service.name":
             value = attribute.get("value", {})
             if set(value) != {"stringValue"} or not isinstance(value["stringValue"], str):
-                raise ValueError("invalid service name")
+                raise TempoShapeError("invalid service name")
             if service is not None:
-                raise ValueError("duplicate service name")
+                raise TempoShapeError("duplicate service name")
             service = value["stringValue"]
     return service
 
@@ -132,9 +139,9 @@ def summarize_trace(response, expected_trace_id: str) -> dict:
         not isinstance(response, dict) or not isinstance(response.get("trace"), dict)
         or any(key in response for key in ("error", "errors"))
     ):
-        raise ValueError("invalid V2 trace")
+        raise TempoShapeError("invalid V2 trace")
     if "batches" in response["trace"]:
-        raise ValueError("legacy trace shape")
+        raise TempoShapeError("legacy trace shape")
     backend = _enum(response.get("status", 0), ("COMPLETE", "PARTIAL")).lower()
     message = _optional_string(response, "message")
     spans = []
@@ -144,21 +151,21 @@ def summarize_trace(response, expected_trace_id: str) -> dict:
         for scope in _array(resource, "scopeSpans"):
             for span in _array(scope, "spans"):
                 if _id(span.get("traceId"), 16) != expected:
-                    raise ValueError("mismatched trace ID")
+                    raise TempoShapeError("mismatched trace ID")
                 span_id = _id(span.get("spanId"), 8)
                 if span_id in seen:
-                    raise ValueError("duplicate span ID")
+                    raise TempoShapeError("duplicate span ID")
                 seen.add(span_id)
                 parent = span.get("parentSpanId", "")
                 parent = None if parent == "" else _id(parent, 8)
                 start = _nanoseconds(span.get("startTimeUnixNano"))
                 end = _nanoseconds(span.get("endTimeUnixNano"))
                 if int(end) < int(start):
-                    raise ValueError("reversed span interval")
+                    raise TempoShapeError("reversed span interval")
                 name = span.get("name", "")
                 status = span.get("status", {})
                 if not isinstance(name, str) or not isinstance(status, dict):
-                    raise ValueError("invalid span name or status")
+                    raise TempoShapeError("invalid span name or status")
                 spans.append({
                     "span_id": span_id, "parent_span_id": parent, "service": service,
                     "name": name, "kind": _enum(span.get("kind", 0), (
