@@ -1,0 +1,503 @@
+"""The query CLI's confirmed boundary: real HTTP, stdout and local evidence."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import threading
+import time
+import tomllib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qsl, unquote, urlsplit
+
+import pytest
+
+from grafana_jsm_sandbox import grafana_query
+from tests.grafana_upstream import FakeGrafana
+
+TOKEN = "viewer-test-secret"
+PRESENTER = "https://presenter.example.invalid/grafana"
+
+
+@pytest.fixture
+def grafana(monkeypatch, tmp_path):
+    upstream = FakeGrafana()
+    upstream.start()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEMO_GRAFANA_URL", upstream.url + "/grafana/")
+    monkeypatch.setenv("DEMO_GRAFANA_PRESENTER_URL", PRESENTER + "/")
+    monkeypatch.setenv("DEMO_GRAFANA_VIEWER_TOKEN", TOKEN)
+    monkeypatch.setenv("DEMO_INVESTIGATION_ENABLED", "false")
+    try:
+        yield upstream
+    finally:
+        upstream.stop()
+
+
+def answer(upstream, data, status=200, delay=0):
+    upstream.responses.append((status, json.dumps(data, ensure_ascii=False).encode(), delay))
+
+
+def query_result(kind, result):
+    return {"status": "success", "data": {"resultType": kind, "result": result}}
+
+
+def record(capsys, tmp_path):
+    output = capsys.readouterr()
+    assert output.err == ""
+    lines = output.out.splitlines()
+    assert len(lines) == 6
+    assert all(len(line) <= 200 for line in lines[:5])
+    saved = (tmp_path / "grafana-evidence.jsonl").read_text(encoding="utf-8").splitlines()
+    assert saved[-1] == lines[5]
+    assert TOKEN not in output.out
+    assert "127.0.0.1" not in output.out
+    evidence = json.loads(lines[5])
+    assert set(evidence) == {
+        "schema_version", "command", "query", "datasource", "path", "parameters", "window",
+        "retrieved_at", "status", "error", "sample_summary", "presenter_link", "response",
+    }
+    assert evidence["retrieved_at"].endswith("Z")
+    assert len(evidence["retrieved_at"]) == 24
+    return lines, evidence
+
+
+def test_instant_proxy_evidence_and_presenter_link(grafana, capsys, tmp_path):
+    expression = 'sum(rate(requests{service="日本",note="it\'s $5"}[5m]))'
+    response = query_result("vector", [{"metric": {"service": "日本"}, "value": [1000, "2"]}])
+    answer(grafana, response)
+    assert grafana_query.main([
+        "instant", "--query", expression, "--datasource", "a/b 日本", "--time", "1000"
+    ]) == 0
+    sent = grafana.received[0]
+    assert sent.method == "GET"
+    assert sent.body == b""
+    assert sent.headers["Authorization"] == "Bearer " + TOKEN
+    assert sent.headers["Accept"] == "application/json"
+    assert urlsplit(sent.path).path == "/grafana/api/datasources/proxy/uid/a%2Fb%20%E6%97%A5%E6%9C%AC/api/v1/query"
+    assert parse_qsl(urlsplit(sent.path).query) == [("query", expression), ("time", "1000")]
+    lines, evidence = record(capsys, tmp_path)
+    assert lines[0] == "grafana-query: ok"
+    assert lines[1] == "query: " + expression
+    assert lines[2] == "datasource: a/b 日本 | window: 1970-01-01T00:16:40.000Z..1970-01-01T00:16:40.000Z | step: none"
+    assert evidence["schema_version"] == 1
+    assert evidence["response"] == response
+    assert evidence["query"] == expression
+    assert evidence["sample_summary"]["series"] == [{
+        "labels": {"service": "日本"}, "count": 1,
+        "latest": {"timestamp": 1000, "value": "2"}, "min": "2", "max": "2",
+    }]
+    prefix = PRESENTER + "/explore?schemaVersion=1&panes="
+    assert evidence["presenter_link"].startswith(prefix)
+    assert json.loads(unquote(evidence["presenter_link"][len(prefix):])) == {
+        "A": {"datasource": "a/b 日本", "queries": [{"refId": "A", "expr": expression,
+        "instant": True, "range": False}], "range": {"from": "1000000", "to": "1000000"}}
+    }
+
+
+def test_range_resolves_one_clock_and_keeps_all_series(grafana, capsys, tmp_path):
+    response = query_result("matrix", [
+        {"metric": {"z": "last", "a": "first"},
+         "values": [[10, "2.0"], [30, "NaN"], [20, "-1"], [30, "+Inf"]]},
+        {"metric": {}, "values": []},
+        {"metric": {"other": "series"}, "values": [[12, "0"]]},
+    ])
+    answer(grafana, response)
+    assert grafana_query.main(["range", "--query", "requests"]) == 0
+    lines, evidence = record(capsys, tmp_path)
+    sent = dict(parse_qsl(urlsplit(grafana.received[0].path).query))
+    assert float(sent["end"]) - float(sent["start"]) == 600
+    assert sent["step"] == "10"
+    assert evidence["window"]["step_seconds"] == 10
+    assert evidence["sample_summary"] == {
+        "result_type": "matrix", "series_count": 3, "sample_count": 5,
+        "unmodelled_count": 0, "discovery_items": None, "series": [
+            {"labels": {"z": "last", "a": "first"}, "count": 4,
+             "latest": {"timestamp": 30, "value": "+Inf"}, "min": "-1", "max": "2.0"},
+            {"labels": {}, "count": 0, "latest": None, "min": None, "max": None},
+            {"labels": {"other": "series"}, "count": 1,
+             "latest": {"timestamp": 12, "value": "0"}, "min": "0", "max": "0"},
+        ],
+    }
+    assert lines[3] == (
+        'samples: 3 series, 5 samples | labels={"a":"first","z":"last"}; '
+        'latest=+Inf@30; min=-1; max=2.0; +2 more series'
+    )
+    panes = json.loads(parse_qsl(urlsplit(evidence["presenter_link"]).query)[1][1])
+    assert panes["A"]["queries"] == [{
+        "refId": "A", "expr": "requests", "instant": False, "range": True,
+    }]
+
+
+@pytest.mark.parametrize("kind,result,outcome,count,series", [
+    ("vector", [], "no data", 0, 0),
+    ("matrix", [{"metric": {}, "values": []}], "no data", 0, 1),
+    ("scalar", [1000, "0"], "observed zero", 1, 1),
+    ("vector", [{"metric": {}, "value": [1000, "-0.00"]}], "observed zero", 1, 1),
+    ("matrix", [{"metric": {}, "values": [[1000, "0"], [1001, "0.0"]]}],
+     "observed zero", 2, 1),
+    ("string", [1000, "hello"], "ok", 1, 1),
+    ("scalar", [1000, "NaN"], "ok", 1, 1),
+    ("scalar", [1000, "-Inf"], "ok", 1, 1),
+])
+def test_zero_empty_and_nonfinite_are_distinct(
+    grafana, capsys, tmp_path, kind, result, outcome, count, series
+):
+    answer(grafana, query_result(kind, result))
+    assert grafana_query.main(["instant", "--query", "requests", "--time", "1000"]) == 0
+    lines, evidence = record(capsys, tmp_path)
+    assert lines[0] == "grafana-query: " + outcome
+    assert evidence["status"] == ("empty" if outcome == "no data" else "ok")
+    assert evidence["sample_summary"]["sample_count"] == count
+    assert evidence["sample_summary"]["series_count"] == series
+    if kind == "string" or (kind == "scalar" and result[1] in {"NaN", "-Inf"}):
+        assert evidence["sample_summary"]["series"][0]["min"] is None
+        assert evidence["sample_summary"]["series"][0]["max"] is None
+
+
+@pytest.mark.parametrize("kind,entry", [
+    ("vector", {"metric": {}, "histogram": [1000, {"count": "1", "sum": "0"}]}),
+    ("matrix", {"metric": {}, "values": [[1000, "0"]],
+                "histograms": [[1001, {"count": "2", "sum": "0"}]]}),
+])
+def test_native_histograms_are_retained_and_never_absent_or_zero(
+    grafana, capsys, tmp_path, kind, entry
+):
+    response = query_result(kind, [entry])
+    answer(grafana, response)
+    assert grafana_query.main(["range", "--query", "requests"]) == 0
+    lines, evidence = record(capsys, tmp_path)
+    assert lines[0] == "grafana-query: ok"
+    assert "unmodelled samples=1" in lines[3]
+    assert evidence["sample_summary"]["unmodelled_count"] == 1
+    assert evidence["sample_summary"]["sample_count"] == (1 if kind == "vector" else 2)
+    assert evidence["response"] == response
+
+
+@pytest.mark.parametrize("response,items,outcome", [
+    ([], 0, "no data"), ({}, 0, "no data"), (["one", "two"], 2, "discovery data"),
+    ({"a": [], "b": []}, 2, "discovery data"), (None, 1, "discovery data"),
+    ("raw JSON", 1, "discovery data"),
+    ({"status": "success"}, 1, "discovery data"),
+    ({"status": "custom", "data": []}, 2, "discovery data"),
+])
+def test_raw_discovery_json_and_repeated_parameters(
+    grafana, capsys, tmp_path, response, items, outcome
+):
+    answer(grafana, response)
+    assert grafana_query.main([
+        "get", "--path", "/api/v1/series", "--param", 'match[]=foo{a="a b"}',
+        "--param", "match[]=日本", "--param", "custom=a=b&c",
+    ]) == 0
+    lines, evidence = record(capsys, tmp_path)
+    assert lines[0] == "grafana-query: " + outcome
+    assert "window: none | step: none" in lines[2]
+    assert lines[3] == f"samples: 0 series, 0 samples | discovery items={items}"
+    assert evidence["query"] is None
+    assert evidence["response"] == response
+    assert evidence["window"] == {"start": None, "end": None, "step_seconds": None}
+    assert evidence["parameters"] == [
+        ["match[]", 'foo{a="a b"}'], ["match[]", "日本"], ["custom", "a=b&c"],
+    ]
+    proxy = "/api/datasources/proxy/uid/prometheus/api/v1/series"
+    assert evidence["presenter_link"] == PRESENTER + proxy + "?" + urlsplit(
+        grafana.received[0].path
+    ).query
+
+
+@pytest.mark.parametrize("data,items,outcome", [
+    ([], 0, "no data"), ({}, 0, "no data"),
+    ([{"service": "one"}, {"service": "two"}, {"service": "three"}], 3, "discovery data"),
+    ({"one": [], "two": [], "three": []}, 3, "discovery data"),
+    (None, 1, "discovery data"), ("raw JSON", 1, "discovery data"),
+])
+def test_discovery_envelopes_count_data_and_retain_response(
+    grafana, capsys, tmp_path, data, items, outcome
+):
+    response = {"status": "success", "data": data}
+    answer(grafana, response)
+    assert grafana_query.main(["get", "--path", "/api/v1/series"]) == 0
+    lines, evidence = record(capsys, tmp_path)
+    assert lines[0] == "grafana-query: " + outcome
+    assert lines[3] == f"samples: 0 series, 0 samples | discovery items={items}"
+    assert evidence["status"] == ("empty" if items == 0 else "ok")
+    assert evidence["sample_summary"]["result_type"] == "discovery"
+    assert evidence["sample_summary"]["discovery_items"] == items
+    assert evidence["response"] == response
+
+
+def test_get_resolves_only_supplied_times_and_step(grafana, capsys, tmp_path):
+    answer(grafana, [])
+    assert grafana_query.main([
+        "get", "--path", "/api/v1/anything", "--param", "time=1970-01-01T01:16:40+01:00",
+        "--param", "step=0.5m",
+    ]) == 0
+    _, evidence = record(capsys, tmp_path)
+    assert evidence["parameters"] == [["time", "1000.0"], ["step", "30.0"]]
+    assert evidence["window"] == {
+        "start": "1970-01-01T00:16:40.000Z", "end": "1970-01-01T00:16:40.000Z",
+        "step_seconds": 30,
+    }
+
+
+def test_get_can_summarize_query_data_and_accept_other_json(grafana, capsys, tmp_path):
+    answer(grafana, query_result("scalar", [1000, "0"]))
+    assert grafana_query.main(["get", "--path", "/api/v1/query", "--param", "query=foo"]) == 0
+    lines, evidence = record(capsys, tmp_path)
+    assert lines[0] == "grafana-query: observed zero"
+    assert evidence["sample_summary"]["result_type"] == "scalar"
+    assert evidence["query"] is None
+    answer(grafana, {"status": "success", "data": {"resultType": "future", "result": {}}})
+    assert grafana_query.main(["get", "--path", "/future"]) == 0
+    lines, evidence = record(capsys, tmp_path)
+    assert lines[0] == "grafana-query: discovery data"
+    assert evidence["sample_summary"]["discovery_items"] == 2
+
+
+@pytest.mark.parametrize("value,seconds", [
+    ("now-1.5s", 1.5), ("now-1.5m", 90), ("now-1.5h", 5400), ("now-1.5d", 129600),
+])
+def test_relative_time_units_share_the_invocation_clock(grafana, capsys, tmp_path, value, seconds):
+    assert grafana_query.main(["range", "--query", "foo", "--start", value]) == 0
+    _, evidence = record(capsys, tmp_path)
+    sent = dict(evidence["parameters"])
+    assert float(sent["end"]) - float(sent["start"]) == seconds
+
+
+@pytest.mark.parametrize("step", ["1e100", "1" + "0" * 400 + ".5"])
+def test_no_step_or_observation_window_cap(grafana, capsys, tmp_path, step):
+    assert grafana_query.main([
+        "range", "--query", "foo", "--start", "0", "--end", "1000000000", "--step", step
+    ]) == 0
+    lines, evidence = record(capsys, tmp_path)
+    if step == "1e100":
+        assert evidence["window"]["step_seconds"] == 10 ** 100
+        assert dict(evidence["parameters"])["step"] == "1" + "0" * 100
+    else:
+        assert '"step_seconds":' + step in lines[5]
+        assert dict(evidence["parameters"])["step"] == step
+
+
+@pytest.mark.parametrize("status,response,kind,message,retained", [
+    (401, {"secret": TOKEN}, "token_rejected", "token rejected", None),
+    (403, {"secret": TOKEN}, "http_error", "HTTP 403", None),
+    (500, {"secret": TOKEN}, "http_error", "HTTP 500", None),
+    (302, {"secret": TOKEN}, "http_error", "HTTP 302", None),
+    (200, {"status": "error", "error": "bad expression"}, "query_error", "query error",
+     {"status": "error", "error": "bad expression"}),
+])
+def test_retrieval_errors_have_unavailable_evidence_without_error_body(
+    grafana, capsys, tmp_path, status, response, kind, message, retained
+):
+    answer(grafana, response, status)
+    assert grafana_query.main(["instant", "--query", "requests"]) == 1
+    lines, evidence = record(capsys, tmp_path)
+    assert lines[0] == "grafana-query: unavailable: " + message
+    assert lines[3] == "samples: 0 series, 0 samples | unavailable"
+    assert evidence["status"] == "unavailable"
+    assert evidence["error"] == {
+        "kind": kind, "message": message,
+        "http_status": status if kind != "query_error" else None,
+    }
+    assert evidence["response"] == retained
+    assert len(grafana.received) == 1
+
+
+@pytest.mark.parametrize("body", [
+    b"not JSON", b"{", b'{"value":NaN}',
+    b'{"status":"success","data":{"resultType":"vector","result":{}}}',
+    b'{"status":"success","data":{"resultType":"vector","result":[{}]}}',
+    b'{"status":"success","data":{"resultType":"scalar","result":[1,2]}}',
+    b'{"status":"success","data":{"resultType":"matrix","result":[{"metric":{},"values":[[1]]}]}}',
+])
+def test_malformed_query_responses_are_unavailable(grafana, capsys, tmp_path, body):
+    grafana.responses.append((200, body, 0))
+    assert grafana_query.main(["instant", "--query", "requests"]) == 1
+    lines, evidence = record(capsys, tmp_path)
+    assert lines[0] == "grafana-query: unavailable: malformed response"
+    assert evidence["sample_summary"]["result_type"] is None
+    assert evidence["error"]["kind"] == "malformed_response"
+
+
+def test_stopped_grafana_is_unreachable(grafana, capsys, tmp_path):
+    grafana.stop()
+    assert grafana_query.main(["get", "--path", "/api/v1/labels"]) == 1
+    lines, evidence = record(capsys, tmp_path)
+    assert lines[0] == "grafana-query: unavailable: unreachable"
+    assert evidence["response"] is None
+
+
+def test_timeout_is_ten_elapsed_seconds(grafana, capsys, tmp_path):
+    answer(grafana, query_result("vector", []), delay=11)
+    before = time.monotonic()
+    assert grafana_query.main(["instant", "--query", "requests"]) == 1
+    elapsed = time.monotonic() - before
+    assert 9.8 <= elapsed < 11
+    lines, evidence = record(capsys, tmp_path)
+    assert lines[0] == "grafana-query: unavailable: timeout after 10s"
+    assert evidence["error"] == {
+        "kind": "timeout", "message": "timeout after 10s", "http_status": None,
+    }
+
+
+def test_timeout_includes_a_trickling_response_body(grafana, monkeypatch, capsys, tmp_path):
+    """An upstream that keeps sending must not reset the elapsed deadline."""
+    finished = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            try:
+                for _ in range(100):
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                    if finished.wait(0.5):
+                        break
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    worker = threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True)
+    worker.start()
+    monkeypatch.setenv("DEMO_GRAFANA_URL", f"http://127.0.0.1:{server.server_address[1]}")
+    before = time.monotonic()
+    try:
+        assert grafana_query.main(["instant", "--query", "requests"]) == 1
+        assert 9.8 <= time.monotonic() - before < 11
+        lines, evidence = record(capsys, tmp_path)
+        assert lines[0] == "grafana-query: unavailable: timeout after 10s"
+        assert evidence["response"] is None
+    finally:
+        finished.set()
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=5)
+
+
+def test_full_record_is_not_clipped_and_attempts_append(grafana, capsys, tmp_path):
+    expression = 'requests{note="' + "x\n\t日本\u0085\u2028\u2029" * 300 + '"}'
+    response = query_result("vector", [
+        {"metric": {"label": "x\u0085\u2028\u2029" * 500}, "value": [1000, "1"]},
+    ])
+    answer(grafana, response)
+    assert grafana_query.main(["instant", "--query", expression, "--time", "1000"]) == 0
+    lines, evidence = record(capsys, tmp_path)
+    assert len(lines[1]) == 200
+    assert lines[1].endswith("...")
+    assert evidence["query"] == expression
+    assert evidence["response"] == response
+    assert len(lines[5]) > 2000
+    assert grafana_query.main(["get", "--path", "/api/v1/labels"]) == 0
+    record(capsys, tmp_path)
+    attempts = (tmp_path / "grafana-evidence.jsonl").read_text().splitlines()
+    assert len(attempts) == 2
+    assert json.loads(attempts[0]) == evidence
+
+
+def test_evidence_write_failure_has_five_lines_and_exit_three(grafana, capsys, tmp_path):
+    (tmp_path / "grafana-evidence.jsonl").mkdir()
+    assert grafana_query.main(["instant", "--query", "requests", "--time", "1000"]) == 3
+    output = capsys.readouterr()
+    lines = output.out.splitlines()
+    assert output.err == ""
+    assert len(lines) == 5
+    assert lines[0] == "grafana-query: unavailable: evidence file could not be written"
+    assert lines[4].startswith("evidence: unavailable | presenter: " + PRESENTER)
+
+
+@pytest.fixture
+def configured(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEMO_GRAFANA_URL", "http://upstream.example.invalid")
+    monkeypatch.setenv("DEMO_GRAFANA_PRESENTER_URL", PRESENTER)
+    monkeypatch.setenv("DEMO_GRAFANA_VIEWER_TOKEN", TOKEN)
+
+
+@pytest.mark.parametrize("arguments,flag", [
+    ([], "command"), (["instant"], "--query"), (["range"], "--query"), (["get"], "--path"),
+    (["--query", "x", "instant"], "command"),
+    (["instant", "--query", "x", "--time", "NaN"], "--time"),
+    (["instant", "--query", "x", "--time", "1970-01-01T00:00:00"], "--time"),
+    (["instant", "--query", "x", "--time", "now-0m"], "--time"),
+    (["instant", "--query", "x", "--datasource", ""], "--datasource"),
+    (["instant", "--query", "x", "--url", "secret"], "--url"),
+    (["instant", "--query", "x", "--token", "secret"], "--token"),
+    (["range", "--query", "x", "--start", "2", "--end", "1"], "--start"),
+    (["range", "--query", "x", "--step", "0"], "--step"),
+    (["range", "--query", "x", "--step", "inf"], "--step"),
+    (["get", "--path", "https://bad.example.invalid/api"], "--path"),
+    (["get", "--path", "//bad.example.invalid/api"], "--path"),
+    (["get", "--path", "/api?q=x"], "--path"),
+    (["get", "--path", "/api#x"], "--path"),
+    (["get", "--path", "api"], "--path"),
+    (["get", "--path", "/api", "--param", "broken"], "--param"),
+    (["get", "--path", "/api", "--param", "=x"], "--param"),
+    (["get", "--path", "/api", "--param", "step=-1"], "--param"),
+])
+def test_invalid_arguments_write_no_evidence(configured, capsys, tmp_path, arguments, flag):
+    assert grafana_query.main(arguments) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert len(output.err.splitlines()) == 1
+    assert output.err.startswith("grafana-query: error: ")
+    assert flag in output.err
+    assert "secret" not in output.err
+    assert not (tmp_path / "grafana-evidence.jsonl").exists()
+
+
+@pytest.mark.parametrize("variable,value", [
+    ("DEMO_GRAFANA_URL", ""),
+    ("DEMO_GRAFANA_URL", "http://user:secret@upstream.example.invalid"),
+    ("DEMO_GRAFANA_URL", "http://upstream.example.invalid:70000"),
+    ("DEMO_GRAFANA_URL", "file:///tmp/secret"),
+    ("DEMO_GRAFANA_URL", "http://upstream.example.invalid/?secret"),
+    ("DEMO_GRAFANA_PRESENTER_URL", ""),
+    ("DEMO_GRAFANA_PRESENTER_URL", "http://user:secret@presenter.example.invalid"),
+    ("DEMO_GRAFANA_VIEWER_TOKEN", ""),
+    ("DEMO_GRAFANA_VIEWER_TOKEN", "secret\n"),
+    ("DEMO_GRAFANA_VIEWER_TOKEN", "secret\rvalue"),
+])
+def test_invalid_configuration_is_token_free_even_when_disabled(
+    configured, monkeypatch, capsys, tmp_path, variable, value
+):
+    monkeypatch.setenv("DEMO_INVESTIGATION_ENABLED", "false")
+    monkeypatch.setenv(variable, value)
+    assert grafana_query.main(["instant", "--query", "x"]) == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert len(output.err.splitlines()) == 1
+    assert variable in output.err
+    assert "secret" not in output.err
+    assert not (tmp_path / "grafana-evidence.jsonl").exists()
+
+
+def test_module_entrypoint_and_console_script(configured, tmp_path):
+    repository = Path(__file__).resolve().parent.parent
+    project = tomllib.loads((repository / "pyproject.toml").read_text())
+    assert project["project"]["scripts"]["grafana-query"] == (
+        "grafana_jsm_sandbox.grafana_query:main"
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "grafana_jsm_sandbox.grafana_query", "instant"],
+        cwd=repository, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "grafana-query: error: the following arguments are required: --query\n"
+
+
+@pytest.mark.parametrize("port", ["", "0", "65536", "not-a-port"])
+def test_invalid_default_presenter_port_is_named(configured, monkeypatch, capsys, port):
+    monkeypatch.delenv("DEMO_GRAFANA_PRESENTER_URL")
+    monkeypatch.setenv("GRAFANA_HOST_PORT", port)
+    assert grafana_query.main(["instant", "--query", "foo"]) == 2
+    output = capsys.readouterr()
+    assert "GRAFANA_HOST_PORT" in output.err
+    assert output.out == ""

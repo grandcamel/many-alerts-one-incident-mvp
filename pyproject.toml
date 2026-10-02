@@ -12,8 +12,9 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-# A Run's payload builder, on the PATH a laptop-mode Run inherits; the image has its own launcher.
+# A Run's tools, on the PATH a laptop-mode Run inherits; the image has its own launchers.
 incident-payload = "grafana_jsm_sandbox.incident_payload:main"
+grafana-query = "grafana_jsm_sandbox.grafana_query:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pyyaml>=6.0"]

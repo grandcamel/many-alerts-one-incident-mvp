@@ -57,6 +57,7 @@ BASIC_DEMO_TESTS = frozenset(
         "test_fixtures.py",
         "test_forwarder.py",
         "test_grafana.py",
+        "test_grafana_query.py",
         "test_group_notifications.py",
         "test_incident_payload.py",
         "test_log_formatter.py",
